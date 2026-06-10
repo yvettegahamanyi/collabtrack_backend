@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+greenlet
+asyncpg
+alembic
+psycopg2-binary
+pydantic-settings
+python-dotenv
+gunicorn
+bcrypt
+pyjwt
+email-validator
+python-multipart
