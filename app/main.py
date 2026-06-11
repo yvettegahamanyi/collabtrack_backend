@@ -30,9 +30,9 @@ Most endpoints require a **Bearer JWT**.
 
 1. Create an account with `POST /auth/register` (returns a token immediately), or
    log in with `POST /auth/login`.
-2. Click the **Authorize** button (top right) and paste your credentials —
-   `/auth/login` is wired into Swagger, so authorizing here applies the token to
-   every protected request.
+2. Copy the `access_token` from the response.
+3. Click **Authorize** (top right) and paste the token — Swagger sends it as
+   `Authorization: Bearer <token>` on every protected request.
 
 ### Roles
 - `STUDENT` / `INSTRUCTOR` — chosen by the user during onboarding (`PATCH /users/me`).

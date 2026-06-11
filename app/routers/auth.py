@@ -69,7 +69,7 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
 @router.post(
     "/login",
     response_model=Token,
-    summary="Log in (OAuth2 password flow)",
+    summary="Log in",
     responses={
         200: {"description": "Authenticated; access token returned."},
         401: {"description": "Incorrect email or password."},
@@ -80,10 +80,10 @@ async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
-    """OAuth2 password login.
+    """Log in with form-encoded `username` (email) and `password`.
 
-    Send **form-encoded** fields `username` (the email) and `password`.
-    In Swagger, use the **Authorize** button rather than calling this directly.
+    Copy the returned `access_token`, then click **Authorize** in Swagger and
+    paste it as the Bearer token.
     """
     user = await db.scalar(select(User).where(User.email == form_data.username))
     if user is None or not verify_password(form_data.password, user.password_hash):
@@ -110,11 +110,10 @@ async def login(
 async def request_password_reset(
     payload: RequestPasswordReset, db: AsyncSession = Depends(get_db)
 ):
+    #     Always returns a generic message so we don't leak which emails exist.
+    # Until an email service is wired up, the raw token is returned in the
+    # `reset_token` field for development convenience.
     """Request a password reset token.
-
-    Always returns a generic message so we don't leak which emails exist.
-    Until an email service is wired up, the raw token is returned in the
-    `reset_token` field for development convenience.
     """
     user = await db.scalar(select(User).where(User.email == payload.email))
 
