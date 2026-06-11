@@ -36,18 +36,9 @@ class ResetPassword(BaseModel):
     )
 
 
-class MessageResponse(BaseModel):
-    message: str = Field(examples=["Password has been reset successfully."])
+class PasswordResetData(BaseModel):
+    """DEV ONLY: reset_token is returned until email delivery is wired up."""
 
-
-class PasswordResetRequestResponse(BaseModel):
-    message: str = Field(
-        examples=[
-            "If an account exists for that email, a reset token has been issued."
-        ]
-    )
-    # No email service is wired up yet, so the raw token is returned here for
-    # development/testing. Remove `reset_token` once emails are integrated.
     reset_token: str | None = Field(
         default=None,
         description="DEV ONLY: the raw reset token. Removed once email is wired up.",

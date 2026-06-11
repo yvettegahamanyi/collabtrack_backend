@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import User
+from app.schemas.response import ApiResponse, success
 from app.schemas.user import UserOut, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -11,7 +12,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 @router.get(
     "/me",
-    response_model=UserOut,
+    response_model=ApiResponse[UserOut],
     summary="Get my profile (whoami)",
     responses={
         200: {"description": "The authenticated user's profile."},
@@ -21,12 +22,15 @@ router = APIRouter(prefix="/users", tags=["users"])
 )
 async def whoami(current_user: User = Depends(get_current_user)):
     """Return the authenticated user's profile."""
-    return current_user
+    return success(
+        data=UserOut.model_validate(current_user),
+        message="Profile retrieved successfully.",
+    )
 
 
 @router.patch(
     "/me",
-    response_model=UserOut,
+    response_model=ApiResponse[UserOut],
     summary="Update my profile / onboarding",
     responses={
         200: {"description": "Updated profile."},
@@ -49,4 +53,7 @@ async def update_me(
     for field, value in data.items():
         setattr(current_user, field, value)
     db.add(current_user)
-    return current_user
+    return success(
+        data=UserOut.model_validate(current_user),
+        message="Profile updated successfully.",
+    )

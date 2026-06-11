@@ -24,8 +24,8 @@ from app.schemas.group import (
     InviteCreate,
     InviteOut,
     MemberOut,
-    MessageResponse,
 )
+from app.schemas.response import ApiResponse, success
 from app.services.groups import (
     get_group_or_404,
     get_membership,
@@ -39,7 +39,7 @@ router = APIRouter(prefix="/groups", tags=["groups"])
 
 @router.post(
     "",
-    response_model=GroupOut,
+    response_model=ApiResponse[GroupOut],
     status_code=status.HTTP_201_CREATED,
     summary="Create a new project group",
     responses={403: {"description": "Only students can create groups."}},
@@ -71,12 +71,16 @@ async def create_group(
         role=GroupMemberRole.STUDENT,
     )
     db.add(membership)
-    return group
+    return success(
+        data=GroupOut.model_validate(group),
+        message="Group created successfully.",
+        code=status.HTTP_201_CREATED,
+    )
 
 
 @router.get(
     "",
-    response_model=list[GroupOut],
+    response_model=ApiResponse[list[GroupOut]],
     summary="List my groups",
 )
 async def list_my_groups(
@@ -90,12 +94,16 @@ async def list_my_groups(
         .where(GroupMembership.user_id == current_user.id)
         .order_by(ProjectGroup.created_at.desc())
     )
-    return list(result.all())
+    groups = [GroupOut.model_validate(group) for group in result.all()]
+    return success(
+        data=groups,
+        message="Groups retrieved successfully.",
+    )
 
 
 @router.get(
     "/{group_id}",
-    response_model=GroupOut,
+    response_model=ApiResponse[GroupOut],
     summary="Get group details",
     responses={403: {"description": "Not a member of this group."}},
 )
@@ -106,12 +114,15 @@ async def get_group(
 ):
     group = await get_group_or_404(group_id, db)
     await require_membership(group_id, current_user, db)
-    return group
+    return success(
+        data=GroupOut.model_validate(group),
+        message="Group retrieved successfully.",
+    )
 
 
 @router.put(
     "/{group_id}",
-    response_model=GroupOut,
+    response_model=ApiResponse[GroupOut],
     summary="Update a group",
     responses={403: {"description": "Only the group owner can update."}},
 )
@@ -127,12 +138,15 @@ async def update_group(
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(group, field, value)
     db.add(group)
-    return group
+    return success(
+        data=GroupOut.model_validate(group),
+        message="Group updated successfully.",
+    )
 
 
 @router.delete(
     "/{group_id}",
-    response_model=MessageResponse,
+    response_model=ApiResponse[None],
     summary="Delete a group",
     responses={403: {"description": "Only the group owner can delete."}},
 )
@@ -145,12 +159,14 @@ async def delete_group(
     group = await get_group_or_404(group_id, db)
     await require_owner(group, current_user)
     await db.delete(group)
-    return MessageResponse(message="Group deleted successfully.")
+    return success(
+        message="Group deleted successfully.",
+    )
 
 
 @router.post(
     "/{group_id}/invite",
-    response_model=InviteOut,
+    response_model=ApiResponse[InviteOut],
     status_code=status.HTTP_201_CREATED,
     summary="Generate a shareable invite link",
     responses={
@@ -180,18 +196,22 @@ async def create_invite(
     db.add(invitation)
 
     invite_url = f"{settings.frontend_url.rstrip('/')}/invite/{raw_token}"
-    return InviteOut(
-        token=raw_token,
-        invite_url=invite_url,
-        role=payload.role,
-        expires_at=expires_at,
-        group_id=group.id,
+    return success(
+        data=InviteOut(
+            token=raw_token,
+            invite_url=invite_url,
+            role=payload.role,
+            expires_at=expires_at,
+            group_id=group.id,
+        ),
+        message="Invite link created successfully.",
+        code=status.HTTP_201_CREATED,
     )
 
 
 @router.get(
     "/{group_id}/members",
-    response_model=list[MemberOut],
+    response_model=ApiResponse[list[MemberOut]],
     summary="List group members",
     responses={403: {"description": "Not a member of this group."}},
 )
@@ -210,7 +230,7 @@ async def list_members(
         .order_by(GroupMembership.joined_at.asc())
     )
     memberships = list(result.all())
-    return [
+    members = [
         MemberOut(
             user_id=m.user_id,
             name=m.user.name,
@@ -221,11 +241,15 @@ async def list_members(
         )
         for m in memberships
     ]
+    return success(
+        data=members,
+        message="Group members retrieved successfully.",
+    )
 
 
 @router.delete(
     "/{group_id}/members/{user_id}",
-    response_model=MessageResponse,
+    response_model=ApiResponse[None],
     summary="Remove a member from a group",
     responses={
         403: {"description": "Not authorized or cannot remove owner."},
@@ -257,4 +281,6 @@ async def remove_member(
     await db.execute(
         delete(GroupMembership).where(GroupMembership.id == membership.id)
     )
-    return MessageResponse(message="Member removed successfully.")
+    return success(
+        message="Member removed successfully.",
+    )

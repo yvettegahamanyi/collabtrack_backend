@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_admin
 from app.models import User
+from app.schemas.response import ApiResponse, success
 from app.schemas.user import UserOut
 
 router = APIRouter(
@@ -30,18 +31,22 @@ async def _get_user_or_404(user_id: str, db: AsyncSession) -> User:
 
 @router.get(
     "/users",
-    response_model=list[UserOut],
+    response_model=ApiResponse[list[UserOut]],
     summary="List all users",
 )
 async def list_users(db: AsyncSession = Depends(get_db)):
     """Return all users, most recently created first."""
     result = await db.scalars(select(User).order_by(User.created_at.desc()))
-    return list(result.all())
+    users = [UserOut.model_validate(user) for user in result.all()]
+    return success(
+        data=users,
+        message="Users retrieved successfully.",
+    )
 
 
 @router.post(
     "/users/{user_id}/activate",
-    response_model=UserOut,
+    response_model=ApiResponse[UserOut],
     summary="Activate a user",
     responses={404: {"description": "User not found."}},
 )
@@ -50,12 +55,15 @@ async def activate_user(user_id: str, db: AsyncSession = Depends(get_db)):
     user = await _get_user_or_404(user_id, db)
     user.is_active = True
     db.add(user)
-    return user
+    return success(
+        data=UserOut.model_validate(user),
+        message="User activated successfully.",
+    )
 
 
 @router.post(
     "/users/{user_id}/deactivate",
-    response_model=UserOut,
+    response_model=ApiResponse[UserOut],
     summary="Deactivate a user",
     responses={
         400: {"description": "Cannot deactivate your own admin account."},
@@ -76,4 +84,7 @@ async def deactivate_user(
         )
     user.is_active = False
     db.add(user)
-    return user
+    return success(
+        data=UserOut.model_validate(user),
+        message="User deactivated successfully.",
+    )

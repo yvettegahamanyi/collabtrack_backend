@@ -17,21 +17,25 @@ from app.database import get_db
 from app.models import PasswordResetToken, User
 from app.schemas.auth import (
     AuthResponse,
-    MessageResponse,
-    PasswordResetRequestResponse,
+    PasswordResetData,
     RegisterRequest,
     RequestPasswordReset,
     ResetPassword,
     Token,
 )
+from app.schemas.response import ApiResponse, success
 from app.schemas.user import UserOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+_PASSWORD_RESET_MESSAGE = (
+    "If an account exists for that email, a reset token has been issued."
+)
+
 
 @router.post(
     "/register",
-    response_model=AuthResponse,
+    response_model=ApiResponse[AuthResponse],
     status_code=status.HTTP_201_CREATED,
     summary="Register a new account",
     responses={
@@ -60,15 +64,19 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         is_active=True,
     )
     db.add(user)
-    await db.flush()  # populate user.id without ending the transaction
+    await db.flush()
 
     token = create_access_token(subject=user.id)
-    return AuthResponse(access_token=token, user=UserOut.model_validate(user))
+    return success(
+        data=AuthResponse(access_token=token, user=UserOut.model_validate(user)),
+        message="Account created successfully.",
+        code=status.HTTP_201_CREATED,
+    )
 
 
 @router.post(
     "/login",
-    response_model=Token,
+    response_model=ApiResponse[Token],
     summary="Log in",
     responses={
         200: {"description": "Authenticated; access token returned."},
@@ -99,48 +107,46 @@ async def login(
         )
 
     token = create_access_token(subject=user.id)
-    return Token(access_token=token)
+    return success(
+        data=Token(access_token=token),
+        message="Login successful.",
+        code=status.HTTP_200_OK,
+    )
 
 
 @router.post(
     "/request-password-reset",
-    response_model=PasswordResetRequestResponse,
+    response_model=ApiResponse[PasswordResetData],
     summary="Request a password reset token",
 )
 async def request_password_reset(
     payload: RequestPasswordReset, db: AsyncSession = Depends(get_db)
 ):
-    #     Always returns a generic message so we don't leak which emails exist.
-    # Until an email service is wired up, the raw token is returned in the
-    # `reset_token` field for development convenience.
-    """Request a password reset token.
-    """
+    """Request a password reset token."""
     user = await db.scalar(select(User).where(User.email == payload.email))
 
-    generic = PasswordResetRequestResponse(
-        message="If an account exists for that email, a reset token has been issued."
+    reset_token: str | None = None
+    if user is not None and user.is_active:
+        raw_token, token_hash = generate_reset_token()
+        reset = PasswordResetToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(minutes=settings.reset_token_expire_minutes),
+        )
+        db.add(reset)
+        reset_token = raw_token
+
+    return success(
+        data=PasswordResetData(reset_token=reset_token),
+        message=_PASSWORD_RESET_MESSAGE,
+        code=status.HTTP_200_OK,
     )
-
-    if user is None or not user.is_active:
-        return generic
-
-    raw_token, token_hash = generate_reset_token()
-    reset = PasswordResetToken(
-        user_id=user.id,
-        token_hash=token_hash,
-        expires_at=datetime.now(timezone.utc)
-        + timedelta(minutes=settings.reset_token_expire_minutes),
-    )
-    db.add(reset)
-
-    # Dev convenience: return the raw token directly (no email service yet).
-    generic.reset_token = raw_token
-    return generic
 
 
 @router.post(
     "/reset-password",
-    response_model=MessageResponse,
+    response_model=ApiResponse[None],
     summary="Reset password using a token",
     responses={
         200: {"description": "Password reset successfully."},
@@ -172,4 +178,7 @@ async def reset_password(payload: ResetPassword, db: AsyncSession = Depends(get_
 
     user.password_hash = hash_password(payload.new_password)
     reset.used = True
-    return MessageResponse(message="Password has been reset successfully.")
+    return success(
+        message="Password has been reset successfully.",
+        code=status.HTTP_200_OK,
+    )

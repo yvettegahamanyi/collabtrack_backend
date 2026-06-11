@@ -1,14 +1,15 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 # Import models so they are registered on Base.metadata.
 from app import models  # noqa: F401
 from app.config import settings
-from app.database import engine, get_db
+from app.database import engine
 from app.routers import admin, auth, groups, invites, users
 
 
@@ -24,6 +25,15 @@ async def lifespan(app: FastAPI):
 API_DESCRIPTION = """
 **CollabTrack** measures and reports individual student contributions across
 shared group assets (GitHub repositories, Google Docs) and meeting transcripts.
+
+### Response format
+All endpoints return a standard envelope:
+
+```json
+{ "data": { ... }, "message": "Human-readable summary", "code": 200 }
+```
+
+Errors use the same shape with `data: null`.
 
 ### Authentication
 Most endpoints require a **Bearer JWT**.
@@ -89,6 +99,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _format_error_message(detail: object) -> str:
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, list):
+        parts = []
+        for item in detail:
+            if isinstance(item, dict):
+                loc = ".".join(str(part) for part in item.get("loc", ()))
+                msg = item.get("msg", "Invalid value")
+                parts.append(f"{loc}: {msg}" if loc else msg)
+            else:
+                parts.append(str(item))
+        return "; ".join(parts) if parts else "Request failed."
+    if isinstance(detail, dict):
+        return str(detail.get("message", detail))
+    return str(detail)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "data": None,
+            "message": _format_error_message(exc.detail),
+            "code": exc.status_code,
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "data": None,
+            "message": _format_error_message(exc.errors()),
+            "code": 422,
+        },
+    )
 
 
 app.include_router(auth.router)

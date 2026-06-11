@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import GroupMembership, User
-from app.schemas.group import InviteAcceptResponse, InviteDetails
+from app.schemas.group import InviteAcceptData, InviteDetails
+from app.schemas.response import ApiResponse, success
 from app.services.groups import get_invitation_by_token
 
 router = APIRouter(prefix="/invite", tags=["invites"])
@@ -27,7 +28,7 @@ def _ensure_invite_valid(invitation) -> None:
 
 @router.get(
     "/{token}",
-    response_model=InviteDetails,
+    response_model=ApiResponse[InviteDetails],
     summary="Validate an invite token",
     responses={
         404: {"description": "Invitation not found."},
@@ -40,18 +41,21 @@ async def get_invite_details(token: str, db: AsyncSession = Depends(get_db)):
     _ensure_invite_valid(invitation)
 
     group = invitation.group
-    return InviteDetails(
-        group_id=group.id,
-        group_name=group.group_name,
-        description=group.description,
-        role=invitation.role,
-        expires_at=invitation.expires_at,
+    return success(
+        data=InviteDetails(
+            group_id=group.id,
+            group_name=group.group_name,
+            description=group.description,
+            role=invitation.role,
+            expires_at=invitation.expires_at,
+        ),
+        message="Invitation details retrieved successfully.",
     )
 
 
 @router.post(
     "/{token}/accept",
-    response_model=InviteAcceptResponse,
+    response_model=ApiResponse[InviteAcceptData],
     summary="Accept an invitation",
     responses={
         409: {"description": "Already a member of this group."},
@@ -86,8 +90,10 @@ async def accept_invite(
     invitation.used = True
 
     group_name = invitation.group.group_name or "the group"
-    return InviteAcceptResponse(
-        message=f"You have successfully joined {group_name}",
-        group_id=invitation.group_id,
-        role=invitation.role,
+    return success(
+        data=InviteAcceptData(
+            group_id=invitation.group_id,
+            role=invitation.role,
+        ),
+        message=f"You have successfully joined {group_name}.",
     )

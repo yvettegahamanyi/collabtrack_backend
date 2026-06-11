@@ -54,8 +54,7 @@ class InviteDetails(BaseModel):
     expires_at: datetime
 
 
-class InviteAcceptResponse(BaseModel):
-    message: str
+class InviteAcceptData(BaseModel):
     group_id: str
     role: GroupMemberRole
 
@@ -67,7 +66,3 @@ class MemberOut(BaseModel):
     role: GroupMemberRole
     is_owner: bool
     joined_at: datetime
-
-
-class MessageResponse(BaseModel):
-    message: str
