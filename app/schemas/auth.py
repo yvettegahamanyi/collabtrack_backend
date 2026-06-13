@@ -11,6 +11,13 @@ class RegisterRequest(BaseModel):
     name: str | None = Field(default=None, examples=["Jane Doe"])
 
 
+class LoginRequest(BaseModel):
+    email: EmailStr = Field(examples=["student@example.com"])
+    password: str = Field(
+        min_length=1, max_length=128, examples=["Secret123!"]
+    )
+
+
 class Token(BaseModel):
     access_token: str = Field(examples=["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."])
     token_type: str = "bearer"

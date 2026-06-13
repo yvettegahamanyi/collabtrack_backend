@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +16,7 @@ from app.database import get_db
 from app.models import PasswordResetToken, User
 from app.schemas.auth import (
     AuthResponse,
+    LoginRequest,
     PasswordResetData,
     RegisterRequest,
     RequestPasswordReset,
@@ -85,16 +85,16 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     },
 )
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    payload: LoginRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Log in with form-encoded `username` (email) and `password`.
+    """Log in with JSON `email` and `password`.
 
-    Copy the returned `access_token`, then click **Authorize** in Swagger and
-    paste it as the Bearer token.
+    Copy `data.access_token` from the response, then click **Authorize** in
+    Swagger and paste it as the Bearer token.
     """
-    user = await db.scalar(select(User).where(User.email == form_data.username))
-    if user is None or not verify_password(form_data.password, user.password_hash):
+    user = await db.scalar(select(User).where(User.email == payload.email))
+    if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",

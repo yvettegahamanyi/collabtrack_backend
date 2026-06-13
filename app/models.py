@@ -254,3 +254,24 @@ class PasswordResetToken(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="password_reset_tokens")
+
+
+class CollabTrackDataset(Base):
+    __tablename__ = "collab_track_dataset"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    student_id: Mapped[str] = mapped_column(String, index=True)
+    group_id: Mapped[str] = mapped_column(String, index=True)
+    assignment_type: Mapped[str] = mapped_column(String)
+    commit_consistency: Mapped[float] = mapped_column(Float)
+    code_share: Mapped[float] = mapped_column(Float)
+    review_participation: Mapped[float] = mapped_column(Float)
+    attendance_ratio: Mapped[float] = mapped_column(Float)
+    speaking_participation_ratio: Mapped[float] = mapped_column(Float)
+    chat_participation_ratio: Mapped[float] = mapped_column(Float)
+    docs_contribution_share: Mapped[float] = mapped_column(Float)
+    comment_activity: Mapped[float] = mapped_column(Float)
+    benchmark_score: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
