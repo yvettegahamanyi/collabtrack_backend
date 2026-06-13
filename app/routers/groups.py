@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.schemas.group import (
     GroupCreate,
+    GroupDetailOut,
     GroupOut,
     GroupUpdate,
     InviteCreate,
@@ -27,11 +28,14 @@ from app.schemas.group import (
 )
 from app.schemas.response import ApiResponse, success
 from app.services.groups import (
+    get_group_members,
     get_group_or_404,
     get_membership,
     require_membership,
     require_owner,
     require_owner_or_instructor,
+    serialize_group_detail,
+    serialize_members,
 )
 
 router = APIRouter(prefix="/groups", tags=["groups"])
@@ -80,21 +84,27 @@ async def create_group(
 
 @router.get(
     "",
-    response_model=ApiResponse[list[GroupOut]],
+    response_model=ApiResponse[list[GroupDetailOut]],
     summary="List my groups",
 )
 async def list_my_groups(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return all groups the current user belongs to."""
+    """Return all groups the current user belongs to, including members."""
     result = await db.scalars(
         select(ProjectGroup)
         .join(GroupMembership, GroupMembership.group_id == ProjectGroup.id)
         .where(GroupMembership.user_id == current_user.id)
+        .options(
+            selectinload(ProjectGroup.memberships).selectinload(GroupMembership.user)
+        )
         .order_by(ProjectGroup.created_at.desc())
     )
-    groups = [GroupOut.model_validate(group) for group in result.all()]
+    groups = [
+        serialize_group_detail(group, group.memberships)
+        for group in result.all()
+    ]
     return success(
         data=groups,
         message="Groups retrieved successfully.",
@@ -103,7 +113,7 @@ async def list_my_groups(
 
 @router.get(
     "/{group_id}",
-    response_model=ApiResponse[GroupOut],
+    response_model=ApiResponse[GroupDetailOut],
     summary="Get group details",
     responses={403: {"description": "Not a member of this group."}},
 )
@@ -114,8 +124,9 @@ async def get_group(
 ):
     group = await get_group_or_404(group_id, db)
     await require_membership(group_id, current_user, db)
+    memberships = await get_group_members(group, db)
     return success(
-        data=GroupOut.model_validate(group),
+        data=serialize_group_detail(group, memberships),
         message="Group retrieved successfully.",
     )
 
@@ -223,26 +234,9 @@ async def list_members(
     group = await get_group_or_404(group_id, db)
     await require_membership(group_id, current_user, db)
 
-    result = await db.scalars(
-        select(GroupMembership)
-        .where(GroupMembership.group_id == group_id)
-        .options(selectinload(GroupMembership.user))
-        .order_by(GroupMembership.joined_at.asc())
-    )
-    memberships = list(result.all())
-    members = [
-        MemberOut(
-            user_id=m.user_id,
-            name=m.user.name,
-            email=m.user.email,
-            role=m.role,
-            is_owner=m.user_id == group.owner_id,
-            joined_at=m.joined_at,
-        )
-        for m in memberships
-    ]
+    memberships = await get_group_members(group, db)
     return success(
-        data=members,
+        data=serialize_members(group, memberships),
         message="Group members retrieved successfully.",
     )
 

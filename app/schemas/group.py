@@ -33,6 +33,19 @@ class GroupOut(BaseModel):
     created_at: datetime
 
 
+class MemberOut(BaseModel):
+    user_id: str
+    name: str | None
+    email: str
+    role: GroupMemberRole
+    is_owner: bool
+    joined_at: datetime
+
+
+class GroupDetailOut(GroupOut):
+    members: list[MemberOut] = []
+
+
 class InviteCreate(BaseModel):
     role: GroupMemberRole = Field(examples=["STUDENT"])
     expires_in_hours: int = Field(default=72, ge=1, le=168, examples=[72])
@@ -57,12 +70,3 @@ class InviteDetails(BaseModel):
 class InviteAcceptData(BaseModel):
     group_id: str
     role: GroupMemberRole
-
-
-class MemberOut(BaseModel):
-    user_id: str
-    name: str | None
-    email: str
-    role: GroupMemberRole
-    is_owner: bool
-    joined_at: datetime

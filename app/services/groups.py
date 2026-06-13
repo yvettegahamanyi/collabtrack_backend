@@ -4,6 +4,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import GroupInvitation, GroupMemberRole, GroupMembership, ProjectGroup, User
+from app.schemas.group import GroupDetailOut, GroupOut, MemberOut
+
+
+def serialize_members(
+    group: ProjectGroup, memberships: list[GroupMembership]
+) -> list[MemberOut]:
+    ordered = sorted(memberships, key=lambda membership: membership.joined_at)
+    return [
+        MemberOut(
+            user_id=membership.user_id,
+            name=membership.user.name,
+            email=membership.user.email,
+            role=membership.role,
+            is_owner=membership.user_id == group.owner_id,
+            joined_at=membership.joined_at,
+        )
+        for membership in ordered
+    ]
+
+
+def serialize_group_detail(
+    group: ProjectGroup, memberships: list[GroupMembership]
+) -> GroupDetailOut:
+    return GroupDetailOut(
+        **GroupOut.model_validate(group).model_dump(),
+        members=serialize_members(group, memberships),
+    )
+
+
+async def get_group_members(
+    group: ProjectGroup, db: AsyncSession
+) -> list[GroupMembership]:
+    result = await db.scalars(
+        select(GroupMembership)
+        .where(GroupMembership.group_id == group.id)
+        .options(selectinload(GroupMembership.user))
+        .order_by(GroupMembership.joined_at.asc())
+    )
+    return list(result.all())
 
 
 async def get_group_or_404(group_id: str, db: AsyncSession) -> ProjectGroup:
