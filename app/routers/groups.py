@@ -10,6 +10,8 @@ from app.core.security import generate_invite_token
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import (
+    GroupGithubRepo,
+    GroupGoogleDoc,
     GroupInvitation,
     GroupMemberRole,
     GroupMembership,
@@ -27,6 +29,13 @@ from app.schemas.group import (
     MemberOut,
 )
 from app.schemas.response import ApiResponse, success
+from app.schemas.integration import (
+    DocumentLinkIn,
+    DocumentOut,
+    RepoLinkIn,
+    RepoOut,
+)
+from app.schemas.participation import ContributionsOut, MemberParticipationOut, SyncOut
 from app.services.groups import (
     get_group_members,
     get_group_or_404,
@@ -36,6 +45,14 @@ from app.services.groups import (
     require_owner_or_instructor,
     serialize_group_detail,
     serialize_members,
+)
+from app.services.integrations import parse_github_repo_url, parse_google_doc_url
+from app.services.participation import (
+    get_contributions,
+    get_member_participation,
+    link_github_repo,
+    link_google_doc,
+    sync_group_participation,
 )
 
 router = APIRouter(prefix="/groups", tags=["groups"])
@@ -277,4 +294,200 @@ async def remove_member(
     )
     return success(
         message="Member removed successfully.",
+    )
+
+
+@router.get(
+    "/{group_id}/repos",
+    response_model=ApiResponse[list[RepoOut]],
+    summary="List linked GitHub repositories",
+)
+async def list_repos(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    repos = await db.scalars(
+        select(GroupGithubRepo)
+        .where(GroupGithubRepo.group_id == group.id)
+        .order_by(GroupGithubRepo.created_at.asc())
+    )
+    return success(
+        data=[RepoOut.model_validate(r) for r in repos.all()],
+        message="Repositories retrieved successfully.",
+    )
+
+
+@router.post(
+    "/{group_id}/repos",
+    response_model=ApiResponse[RepoOut],
+    status_code=status.HTTP_201_CREATED,
+    summary="Link a GitHub repository to a group",
+)
+async def add_repo(
+    group_id: str,
+    payload: RepoLinkIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner(group, current_user)
+    owner, repo = parse_github_repo_url(payload.url)
+    record = await link_github_repo(group, payload.url, owner, repo, db)
+    return success(
+        data=RepoOut.model_validate(record),
+        message="Repository linked successfully.",
+        code=status.HTTP_201_CREATED,
+    )
+
+
+@router.delete(
+    "/{group_id}/repos/{repo_id}",
+    response_model=ApiResponse[None],
+    summary="Unlink a GitHub repository",
+)
+async def remove_repo(
+    group_id: str,
+    repo_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner(group, current_user)
+    repo = await db.get(GroupGithubRepo, repo_id)
+    if repo is None or repo.group_id != group.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found in this group.",
+        )
+    await db.delete(repo)
+    return success(message="Repository unlinked successfully.")
+
+
+@router.get(
+    "/{group_id}/documents",
+    response_model=ApiResponse[list[DocumentOut]],
+    summary="List linked Google Docs",
+)
+async def list_documents(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    docs = await db.scalars(
+        select(GroupGoogleDoc)
+        .where(GroupGoogleDoc.group_id == group.id)
+        .order_by(GroupGoogleDoc.created_at.asc())
+    )
+    return success(
+        data=[DocumentOut.model_validate(d) for d in docs.all()],
+        message="Documents retrieved successfully.",
+    )
+
+
+@router.post(
+    "/{group_id}/documents",
+    response_model=ApiResponse[DocumentOut],
+    status_code=status.HTTP_201_CREATED,
+    summary="Link a Google Doc to a group",
+)
+async def add_document(
+    group_id: str,
+    payload: DocumentLinkIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner(group, current_user)
+    file_id = parse_google_doc_url(payload.url)
+    record = await link_google_doc(group, payload.url, file_id, db)
+    return success(
+        data=DocumentOut.model_validate(record),
+        message="Document linked successfully.",
+        code=status.HTTP_201_CREATED,
+    )
+
+
+@router.delete(
+    "/{group_id}/documents/{doc_id}",
+    response_model=ApiResponse[None],
+    summary="Unlink a Google Doc",
+)
+async def remove_document(
+    group_id: str,
+    doc_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner(group, current_user)
+    doc = await db.get(GroupGoogleDoc, doc_id)
+    if doc is None or doc.group_id != group.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found in this group.",
+        )
+    await db.delete(doc)
+    return success(message="Document unlinked successfully.")
+
+
+@router.post(
+    "/{group_id}/sync",
+    response_model=ApiResponse[SyncOut],
+    summary="Sync group participation data from GitHub and Google",
+)
+async def sync_group(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner(group, current_user)
+    result = await sync_group_participation(group, db)
+    return success(
+        data=result,
+        message="Group participation data synced.",
+    )
+
+
+@router.get(
+    "/{group_id}/contributions",
+    response_model=ApiResponse[ContributionsOut],
+    summary="Get raw contribution metrics for all members",
+)
+async def get_group_contributions(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    data = await get_contributions(group, db)
+    return success(
+        data=data,
+        message="Contributions retrieved successfully.",
+    )
+
+
+@router.get(
+    "/{group_id}/members/{user_id}/participation",
+    response_model=ApiResponse[MemberParticipationOut],
+    summary="Get participation metrics for one member",
+)
+async def get_member_participation_endpoint(
+    group_id: str,
+    user_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    data = await get_member_participation(group, user_id, db)
+    return success(
+        data=data,
+        message="Participation retrieved successfully.",
     )

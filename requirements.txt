@@ -13,3 +13,5 @@ pyjwt
 email-validator
 python-multipart
 load_dotenv
+httpx
+cryptography

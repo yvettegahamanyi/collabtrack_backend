@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     # Base URL for invite links (no trailing slash)
     frontend_url: str = "http://localhost:3000"
 
+    # GitHub OAuth
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    github_callback_url: str = "http://localhost:8000/integrations/github/callback"
+
+    # Google OAuth
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_callback_url: str = "http://localhost:8000/integrations/google/callback"
+
+    # Fernet key for encrypting OAuth tokens at rest (generate with cryptography.fernet.Fernet.generate_key())
+    token_encryption_key: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

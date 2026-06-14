@@ -63,3 +63,19 @@ def generate_invite_token() -> tuple[str, str]:
 
 def hash_invite_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def create_oauth_state(user_id: str, provider: str) -> str:
+    """Signed state token passed through the OAuth redirect flow."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    payload = {"sub": user_id, "provider": provider, "exp": expire, "type": "oauth_state"}
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+
+def decode_oauth_state(state: str) -> dict:
+    payload = jwt.decode(
+        state, settings.secret_key, algorithms=[settings.algorithm]
+    )
+    if payload.get("type") != "oauth_state":
+        raise jwt.InvalidTokenError("Invalid OAuth state token.")
+    return payload

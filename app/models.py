@@ -39,6 +39,11 @@ class PlatformType(str, enum.Enum):
     GOOGLE_DOCS = "GOOGLE_DOCS"
 
 
+class IntegrationProvider(str, enum.Enum):
+    GITHUB = "github"
+    GOOGLE = "google"
+
+
 class ServiceType(str, enum.Enum):
     ACTIVE = "ACTIVE"
     DONE = "DONE"
@@ -78,12 +83,89 @@ class User(Base):
     oauth_tokens: Mapped[list["StudentOAuthToken"]] = relationship(
         back_populates="student", cascade="all, delete-orphan"
     )
+    integrations: Mapped[list["UserIntegration"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     memberships: Mapped[list["GroupMembership"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
     password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+
+
+class UserIntegration(Base):
+    __tablename__ = "user_integrations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_user_integration_provider"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    provider: Mapped[IntegrationProvider] = mapped_column(SAEnum(IntegrationProvider))
+    provider_user_id: Mapped[str] = mapped_column(String)
+    provider_login: Mapped[str | None] = mapped_column(String)
+    provider_email: Mapped[str | None] = mapped_column(String)
+    email_matched: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    access_token_enc: Mapped[str] = mapped_column(Text)
+    refresh_token_enc: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    connected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="integrations")
+
+
+class GroupGithubRepo(Base):
+    __tablename__ = "group_github_repos"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    owner: Mapped[str] = mapped_column(String)
+    repo: Mapped[str] = mapped_column(String)
+    default_branch: Mapped[str | None] = mapped_column(String)
+    url: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped["ProjectGroup"] = relationship(back_populates="github_repos")
+
+
+class GroupGoogleDoc(Base):
+    __tablename__ = "group_google_docs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    file_id: Mapped[str] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String)
+    url: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped["ProjectGroup"] = relationship(back_populates="google_docs")
+
+
+class ParticipationSnapshot(Base):
+    __tablename__ = "participation_snapshots"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_participation_group_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped["ProjectGroup"] = relationship(back_populates="participation_snapshots")
+    user: Mapped["User"] = relationship()
 
 
 class StudentOAuthToken(Base):
@@ -132,6 +214,15 @@ class ProjectGroup(Base):
         back_populates="group", cascade="all, delete-orphan"
     )
     contribution_reports: Mapped[list["ContributionReport"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+    github_repos: Mapped[list["GroupGithubRepo"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+    google_docs: Mapped[list["GroupGoogleDoc"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+    participation_snapshots: Mapped[list["ParticipationSnapshot"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
 

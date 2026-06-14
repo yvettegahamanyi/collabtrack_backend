@@ -10,7 +10,7 @@ from sqlalchemy import text
 from app import models  # noqa: F401
 from app.config import settings
 from app.database import engine
-from app.routers import admin, auth, dataset, groups, invites, users
+from app.routers import admin, auth, dataset, groups, integrations, invites, users
 
 
 @asynccontextmanager
@@ -74,6 +74,10 @@ tags_metadata = [
     {
         "name": "dataset",
         "description": "Collab track benchmark dataset import and retrieval.",
+    },
+    {
+        "name": "integrations",
+        "description": "GitHub and Google OAuth connections for participation tracking.",
     },
     # {
     #     "name": "health",
@@ -155,6 +159,7 @@ app.include_router(admin.router)
 app.include_router(groups.router)
 app.include_router(invites.router)
 app.include_router(dataset.router)
+app.include_router(integrations.router)
 
 
 # @app.get("/", tags=["health"], summary="Service root")
