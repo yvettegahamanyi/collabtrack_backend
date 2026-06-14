@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     admin_name: str = "CollabTrack Admin"
 
     # Base URL for invite links (no trailing slash)
-    frontend_url: str = "http://localhost:3000"
+    frontend_url: str = "https://collabtrackfrontend-production.up.railway.app"
 
     # GitHub OAuth
     github_client_id: str = ""

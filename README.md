@@ -1,8 +1,6 @@
 # CollabTrack Backend
 
-FastAPI backend for **CollabTrack** — a capstone project tool that measures and reports individual student contributions across shared group assets (GitHub repositories, Google Docs, and meeting transcripts).
-
-The API powers user authentication, project group management, OAuth integrations, and raw participation metrics that the frontend displays in contribution reports.
+FastAPI backend for **CollabTrack** — collabTrack is a collaboration analytics system that helps make individual contributions in online student group work more visible, trackable, and fairly evaluated.
 
 ## Features
 
