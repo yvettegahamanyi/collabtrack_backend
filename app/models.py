@@ -12,13 +12,39 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+
+class IntegrationProviderType(TypeDecorator):
+    """Bind integration provider enum values (github/google), not Python names."""
+
+    impl = PG_ENUM(
+        "github",
+        "google",
+        name="integrationprovider",
+        create_type=False,
+    )
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, IntegrationProvider):
+            return value.value
+        return str(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return IntegrationProvider(value)
 
 
 def generate_uuid() -> str:
@@ -40,8 +66,8 @@ class PlatformType(str, enum.Enum):
 
 
 class IntegrationProvider(str, enum.Enum):
-    GITHUB = "github"
-    GOOGLE = "google"
+    github = "github"
+    google = "google"
 
 
 class ServiceType(str, enum.Enum):
@@ -102,7 +128,7 @@ class UserIntegration(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
-    provider: Mapped[IntegrationProvider] = mapped_column(SAEnum(IntegrationProvider))
+    provider: Mapped[IntegrationProvider] = mapped_column(IntegrationProviderType())
     provider_user_id: Mapped[str] = mapped_column(String)
     provider_login: Mapped[str | None] = mapped_column(String)
     provider_email: Mapped[str | None] = mapped_column(String)

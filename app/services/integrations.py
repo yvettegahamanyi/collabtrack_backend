@@ -98,7 +98,7 @@ async def get_user_integration(
     return await db.scalar(
         select(UserIntegration).where(
             UserIntegration.user_id == user_id,
-            UserIntegration.provider == provider,
+            UserIntegration.provider == provider.value,
         )
     )
 
@@ -106,8 +106,8 @@ async def get_user_integration(
 async def get_integrations_status(
     user: User, db: AsyncSession
 ) -> IntegrationsStatusOut:
-    github = await get_user_integration(db, user.id, IntegrationProvider.GITHUB)
-    google = await get_user_integration(db, user.id, IntegrationProvider.GOOGLE)
+    github = await get_user_integration(db, user.id, IntegrationProvider.github)
+    google = await get_user_integration(db, user.id, IntegrationProvider.google)
     return IntegrationsStatusOut(
         github=_provider_status(github),
         google=_provider_status(google),
@@ -120,7 +120,7 @@ def build_github_connect_url(user: User) -> str:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GitHub OAuth is not configured.",
         )
-    state = create_oauth_state(user.id, IntegrationProvider.GITHUB.value)
+    state = create_oauth_state(user.id, IntegrationProvider.github.value)
     params = urlencode(
         {
             "client_id": GITHUB_CLIENT_ID,
@@ -138,7 +138,7 @@ def build_google_connect_url(user: User) -> str:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Google OAuth is not configured.",
         )
-    state = create_oauth_state(user.id, IntegrationProvider.GOOGLE.value)
+    state = create_oauth_state(user.id, IntegrationProvider.google.value)
     params = urlencode(
         {
             "client_id": GOOGLE_CLIENT_ID,
@@ -204,7 +204,7 @@ async def handle_github_callback(code: str, state: str, db: AsyncSession) -> str
     except jwt.PyJWTError:
         return _frontend_redirect("github", "error")
 
-    if payload.get("provider") != IntegrationProvider.GITHUB.value:
+    if payload.get("provider") != IntegrationProvider.github.value:
         return _frontend_redirect("github", "error")
 
     user = await db.get(User, payload["sub"])
@@ -249,7 +249,7 @@ async def handle_github_callback(code: str, state: str, db: AsyncSession) -> str
     await _upsert_integration(
         db,
         user=user,
-        provider=IntegrationProvider.GITHUB,
+        provider=IntegrationProvider.github,
         provider_user_id=str(gh_user["id"]),
         provider_login=gh_user.get("login"),
         provider_email=primary_email or gh_user.get("email"),
@@ -266,7 +266,7 @@ async def handle_google_callback(code: str, state: str, db: AsyncSession) -> str
     except jwt.PyJWTError:
         return _frontend_redirect("google", "error")
 
-    if payload.get("provider") != IntegrationProvider.GOOGLE.value:
+    if payload.get("provider") != IntegrationProvider.google.value:
         return _frontend_redirect("google", "error")
 
     user = await db.get(User, payload["sub"])
@@ -308,7 +308,7 @@ async def handle_google_callback(code: str, state: str, db: AsyncSession) -> str
     await _upsert_integration(
         db,
         user=user,
-        provider=IntegrationProvider.GOOGLE,
+        provider=IntegrationProvider.google,
         provider_user_id=g_user["id"],
         provider_login=None,
         provider_email=g_user.get("email"),
@@ -325,7 +325,7 @@ async def disconnect_integration(
     await db.execute(
         delete(UserIntegration).where(
             UserIntegration.user_id == user.id,
-            UserIntegration.provider == provider,
+            UserIntegration.provider == provider.value,
         )
     )
 
