@@ -82,7 +82,7 @@ async def disconnect_github(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await disconnect_integration(current_user, IntegrationProvider.GITHUB, db)
+    await disconnect_integration(current_user, IntegrationProvider.github, db)
     return success(message="GitHub integration disconnected.")
 
 
@@ -123,5 +123,5 @@ async def disconnect_google(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await disconnect_integration(current_user, IntegrationProvider.GOOGLE, db)
+    await disconnect_integration(current_user, IntegrationProvider.google, db)
     return success(message="Google integration disconnected.")

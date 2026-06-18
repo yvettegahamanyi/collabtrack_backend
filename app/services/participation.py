@@ -122,10 +122,10 @@ async def sync_group_participation(
     for membership in member_list:
         user = membership.user
         gh = await get_user_integration(
-            db, user.id, IntegrationProvider.GITHUB
+            db, user.id, IntegrationProvider.github
         )
         goog = await get_user_integration(
-            db, user.id, IntegrationProvider.GOOGLE
+            db, user.id, IntegrationProvider.google
         )
         integrations_by_user[user.id] = {"github": gh, "google": goog}
         if gh and gh.provider_login:
@@ -237,10 +237,10 @@ async def get_contributions(
     for membership in memberships.all():
         user = membership.user
         gh = await get_user_integration(
-            db, user.id, IntegrationProvider.GITHUB
+            db, user.id, IntegrationProvider.github
         )
         goog = await get_user_integration(
-            db, user.id, IntegrationProvider.GOOGLE
+            db, user.id, IntegrationProvider.google
         )
         snapshot = snapshot_by_user.get(user.id)
 
@@ -296,7 +296,7 @@ async def _find_github_token_for_group(
     )
     for membership in memberships.all():
         integration = await get_user_integration(
-            db, membership.user_id, IntegrationProvider.GITHUB
+            db, membership.user_id, IntegrationProvider.github
         )
         if integration:
             try:
@@ -314,7 +314,7 @@ async def _find_google_token_for_group(
     )
     for membership in memberships.all():
         integration = await get_user_integration(
-            db, membership.user_id, IntegrationProvider.GOOGLE
+            db, membership.user_id, IntegrationProvider.google
         )
         if integration:
             try:
