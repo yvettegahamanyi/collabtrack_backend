@@ -7,8 +7,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-from app.config import settings
-from app.database import Base
+from app.database import DATABASE_URL, Base
 from app import models  # noqa: F401  (ensures models register on Base.metadata)
 
 # this is the Alembic Config object, which provides
@@ -17,7 +16,7 @@ config = context.config
 
 # Inject the database URL from application settings (.env) so we don't
 # duplicate credentials in alembic.ini.
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

@@ -1,14 +1,20 @@
+import os
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+load_dotenv()
+
+APP_NAME = os.getenv("APP_NAME", "CollabTrack")
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
+
 # Import models so they are registered on Base.metadata.
 from app import models  # noqa: F401
-from app.config import settings
 from app.database import engine
 from app.routers import admin, auth, dataset, groups, integrations, invites, users
 
@@ -86,10 +92,10 @@ tags_metadata = [
 ]
 
 app = FastAPI(
-    title=settings.app_name,
+    title=APP_NAME,
     # description=API_DESCRIPTION,
     version="0.1.0",
-    debug=settings.debug,
+    debug=DEBUG,
     lifespan=lifespan,
     openapi_tags=tags_metadata,
     contact={"name": "CollabTrack Team"},

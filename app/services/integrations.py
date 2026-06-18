@@ -1,14 +1,34 @@
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
 import jwt
+from dotenv import load_dotenv
 from fastapi import HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+load_dotenv()
+
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
+GITHUB_CALLBACK_URL = os.getenv(
+    "GITHUB_CALLBACK_URL",
+    "http://localhost:8000/integrations/github/callback",
+)
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_CALLBACK_URL = os.getenv(
+    "GOOGLE_CALLBACK_URL",
+    "http://localhost:8000/integrations/google/callback",
+)
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "https://collabtrackfrontend-production.up.railway.app",
+)
+
 from app.core.encryption import decrypt_token, encrypt_token
 from app.core.security import create_oauth_state, decode_oauth_state
 from app.models import IntegrationProvider, User, UserIntegration
@@ -95,7 +115,7 @@ async def get_integrations_status(
 
 
 def build_github_connect_url(user: User) -> str:
-    if not settings.github_client_id:
+    if not GITHUB_CLIENT_ID:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GitHub OAuth is not configured.",
@@ -103,8 +123,8 @@ def build_github_connect_url(user: User) -> str:
     state = create_oauth_state(user.id, IntegrationProvider.GITHUB.value)
     params = urlencode(
         {
-            "client_id": settings.github_client_id,
-            "redirect_uri": settings.github_callback_url,
+            "client_id": GITHUB_CLIENT_ID,
+            "redirect_uri": GITHUB_CALLBACK_URL,
             "scope": _GITHUB_SCOPES,
             "state": state,
         }
@@ -113,7 +133,7 @@ def build_github_connect_url(user: User) -> str:
 
 
 def build_google_connect_url(user: User) -> str:
-    if not settings.google_client_id:
+    if not GOOGLE_CLIENT_ID:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Google OAuth is not configured.",
@@ -121,8 +141,8 @@ def build_google_connect_url(user: User) -> str:
     state = create_oauth_state(user.id, IntegrationProvider.GOOGLE.value)
     params = urlencode(
         {
-            "client_id": settings.google_client_id,
-            "redirect_uri": settings.google_callback_url,
+            "client_id": GOOGLE_CLIENT_ID,
+            "redirect_uri": GOOGLE_CALLBACK_URL,
             "response_type": "code",
             "scope": _GOOGLE_SCOPES,
             "access_type": "offline",
@@ -196,10 +216,10 @@ async def handle_github_callback(code: str, state: str, db: AsyncSession) -> str
             _GITHUB_TOKEN_URL,
             headers={"Accept": "application/json"},
             data={
-                "client_id": settings.github_client_id,
-                "client_secret": settings.github_client_secret,
+                "client_id": GITHUB_CLIENT_ID,
+                "client_secret": GITHUB_CLIENT_SECRET,
                 "code": code,
-                "redirect_uri": settings.github_callback_url,
+                "redirect_uri": GITHUB_CALLBACK_URL,
             },
         )
         if token_resp.status_code != 200:
@@ -257,11 +277,11 @@ async def handle_google_callback(code: str, state: str, db: AsyncSession) -> str
         token_resp = await client.post(
             _GOOGLE_TOKEN_URL,
             data={
-                "client_id": settings.google_client_id,
-                "client_secret": settings.google_client_secret,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
                 "code": code,
                 "grant_type": "authorization_code",
-                "redirect_uri": settings.google_callback_url,
+                "redirect_uri": GOOGLE_CALLBACK_URL,
             },
         )
         if token_resp.status_code != 200:
@@ -311,7 +331,7 @@ async def disconnect_integration(
 
 
 def _frontend_redirect(integration: str, status_value: str) -> str:
-    base = settings.frontend_url.rstrip("/")
+    base = FRONTEND_URL.rstrip("/")
     return f"{base}/student/settings?integration={integration}&status={status_value}"
 
 
@@ -336,8 +356,8 @@ async def refresh_google_token_if_needed(
         resp = await client.post(
             _GOOGLE_TOKEN_URL,
             data={
-                "client_id": settings.google_client_id,
-                "client_secret": settings.google_client_secret,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
             },

@@ -5,13 +5,11 @@ greenlet
 asyncpg
 alembic
 psycopg2-binary
-pydantic-settings
 python-dotenv
 gunicorn
 bcrypt
 pyjwt
 email-validator
 python-multipart
-load_dotenv
 httpx
 cryptography

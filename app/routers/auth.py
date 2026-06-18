@@ -1,10 +1,15 @@
+import os
 from datetime import datetime, timedelta, timezone
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+load_dotenv()
+
+RESET_TOKEN_EXPIRE_MINUTES = int(os.getenv("RESET_TOKEN_EXPIRE_MINUTES", "30"))
+
 from app.core.security import (
     create_access_token,
     generate_reset_token,
@@ -132,7 +137,7 @@ async def request_password_reset(
             user_id=user.id,
             token_hash=token_hash,
             expires_at=datetime.now(timezone.utc)
-            + timedelta(minutes=settings.reset_token_expire_minutes),
+            + timedelta(minutes=RESET_TOKEN_EXPIRE_MINUTES),
         )
         db.add(reset)
         reset_token = raw_token

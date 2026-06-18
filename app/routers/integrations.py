@@ -1,8 +1,17 @@
+import os
+
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+load_dotenv()
+
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "https://collabtrackfrontend-production.up.railway.app",
+)
+
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import IntegrationProvider, User
@@ -58,7 +67,7 @@ async def github_callback(
 ):
     if not code or not state:
         return RedirectResponse(
-            url=f"{settings.frontend_url.rstrip('/')}/student/settings?integration=github&status=error"
+            url=f"{FRONTEND_URL.rstrip('/')}/student/settings?integration=github&status=error"
         )
     redirect_url = await handle_github_callback(code, state, db)
     return RedirectResponse(url=redirect_url)
@@ -99,7 +108,7 @@ async def google_callback(
 ):
     if not code or not state:
         return RedirectResponse(
-            url=f"{settings.frontend_url.rstrip('/')}/student/settings?integration=google&status=error"
+            url=f"{FRONTEND_URL.rstrip('/')}/student/settings?integration=google&status=error"
         )
     redirect_url = await handle_google_callback(code, state, db)
     return RedirectResponse(url=redirect_url)

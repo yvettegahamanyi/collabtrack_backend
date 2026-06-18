@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-# Load environment variables
 load_dotenv()
 
 
@@ -24,7 +23,7 @@ _raw_url = os.getenv("DATABASE_URL")
 if not _raw_url:
     raise RuntimeError("DATABASE_URL is not set. Add it to .env or your environment.")
 DATABASE_URL = _async_database_url(_raw_url)
-DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
 
 class Base(DeclarativeBase):

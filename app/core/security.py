@@ -1,11 +1,17 @@
 import hashlib
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
+from dotenv import load_dotenv
 
-from app.config import settings
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY", "CHANGE_ME_IN_ENV")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", str(60 * 24)))
 
 # bcrypt only uses the first 72 bytes of a password.
 _BCRYPT_MAX_BYTES = 72
@@ -31,15 +37,15 @@ def verify_password(password: str, password_hash: str) -> bool:
 def create_access_token(subject: str, expires_minutes: int | None = None) -> str:
     """Create a signed JWT access token for the given subject (user id)."""
     expire = datetime.now(timezone.utc) + timedelta(
-        minutes=expires_minutes or settings.access_token_expire_minutes
+        minutes=expires_minutes or ACCESS_TOKEN_EXPIRE_MINUTES
     )
     payload = {"sub": subject, "exp": expire, "type": "access"}
-    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
     """Decode and verify a JWT access token. Raises jwt.PyJWTError on failure."""
-    return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
 
 def generate_reset_token() -> tuple[str, str]:
@@ -69,13 +75,11 @@ def create_oauth_state(user_id: str, provider: str) -> str:
     """Signed state token passed through the OAuth redirect flow."""
     expire = datetime.now(timezone.utc) + timedelta(minutes=15)
     payload = {"sub": user_id, "provider": provider, "exp": expire, "type": "oauth_state"}
-    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_oauth_state(state: str) -> dict:
-    payload = jwt.decode(
-        state, settings.secret_key, algorithms=[settings.algorithm]
-    )
+    payload = jwt.decode(state, SECRET_KEY, algorithms=[ALGORITHM])
     if payload.get("type") != "oauth_state":
         raise jwt.InvalidTokenError("Invalid OAuth state token.")
     return payload

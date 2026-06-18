@@ -1,13 +1,17 @@
-from cryptography.fernet import Fernet, InvalidToken
+import os
 
-from app.config import settings
+from cryptography.fernet import Fernet, InvalidToken
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY", "")
 
 
 def _get_fernet() -> Fernet:
-    key = settings.token_encryption_key
-    if not key:
+    if not TOKEN_ENCRYPTION_KEY:
         raise RuntimeError("TOKEN_ENCRYPTION_KEY is not configured.")
-    return Fernet(key.encode() if isinstance(key, str) else key)
+    return Fernet(TOKEN_ENCRYPTION_KEY.encode())
 
 
 def encrypt_token(plaintext: str) -> str:

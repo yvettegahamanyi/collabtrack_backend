@@ -1,11 +1,19 @@
+import os
 from datetime import datetime, timedelta, timezone
 
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.config import settings
+load_dotenv()
+
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "https://collabtrackfrontend-production.up.railway.app",
+)
+
 from app.core.security import generate_invite_token
 from app.database import get_db
 from app.dependencies import get_current_user
@@ -223,7 +231,7 @@ async def create_invite(
     )
     db.add(invitation)
 
-    invite_url = f"{settings.frontend_url.rstrip('/')}/invite/{raw_token}"
+    invite_url = f"{FRONTEND_URL.rstrip('/')}/invite/{raw_token}"
     return success(
         data=InviteOut(
             token=raw_token,

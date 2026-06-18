@@ -29,8 +29,7 @@ FastAPI backend for **CollabTrack** — collabTrack is a collaboration analytics
 ```
 app/
 ├── main.py              # FastAPI app, CORS, error handlers
-├── config.py            # Environment settings
-├── database.py          # Async engine and session
+├── database.py          # Async engine, session, DATABASE_URL from .env
 ├── dependencies.py      # Auth dependencies (JWT)
 ├── models.py            # SQLAlchemy ORM models
 ├── core/
