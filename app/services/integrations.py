@@ -109,6 +109,8 @@ async def get_integrations_status(
     github = await get_user_integration(db, user.id, IntegrationProvider.github)
     google = await get_user_integration(db, user.id, IntegrationProvider.google)
     return IntegrationsStatusOut(
+        user_id=user.id,
+        user_email=user.email,
         github=_provider_status(github),
         google=_provider_status(google),
     )

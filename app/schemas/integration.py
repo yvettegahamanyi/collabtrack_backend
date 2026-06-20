@@ -12,6 +12,8 @@ class ProviderStatus(BaseModel):
 
 
 class IntegrationsStatusOut(BaseModel):
+    user_id: str
+    user_email: str
     github: ProviderStatus
     google: ProviderStatus
 

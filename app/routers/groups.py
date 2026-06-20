@@ -333,6 +333,7 @@ async def list_repos(
     response_model=ApiResponse[RepoOut],
     status_code=status.HTTP_201_CREATED,
     summary="Link a GitHub repository to a group",
+    responses={403: {"description": "Only owner or instructor can link repositories."}},
 )
 async def add_repo(
     group_id: str,
@@ -341,7 +342,7 @@ async def add_repo(
     db: AsyncSession = Depends(get_db),
 ):
     group = await get_group_or_404(group_id, db)
-    await require_owner(group, current_user)
+    await require_owner_or_instructor(group, current_user, db)
     owner, repo = parse_github_repo_url(payload.url)
     record = await link_github_repo(group, payload.url, owner, repo, db)
     return success(
@@ -355,6 +356,7 @@ async def add_repo(
     "/{group_id}/repos/{repo_id}",
     response_model=ApiResponse[None],
     summary="Unlink a GitHub repository",
+    responses={403: {"description": "Only owner or instructor can unlink repositories."}},
 )
 async def remove_repo(
     group_id: str,
@@ -363,7 +365,7 @@ async def remove_repo(
     db: AsyncSession = Depends(get_db),
 ):
     group = await get_group_or_404(group_id, db)
-    await require_owner(group, current_user)
+    await require_owner_or_instructor(group, current_user, db)
     repo = await db.get(GroupGithubRepo, repo_id)
     if repo is None or repo.group_id != group.id:
         raise HTTPException(
@@ -402,6 +404,7 @@ async def list_documents(
     response_model=ApiResponse[DocumentOut],
     status_code=status.HTTP_201_CREATED,
     summary="Link a Google Doc to a group",
+    responses={403: {"description": "Only owner or instructor can link documents."}},
 )
 async def add_document(
     group_id: str,
@@ -410,7 +413,7 @@ async def add_document(
     db: AsyncSession = Depends(get_db),
 ):
     group = await get_group_or_404(group_id, db)
-    await require_owner(group, current_user)
+    await require_owner_or_instructor(group, current_user, db)
     file_id = parse_google_doc_url(payload.url)
     record = await link_google_doc(group, payload.url, file_id, db)
     return success(
@@ -424,6 +427,7 @@ async def add_document(
     "/{group_id}/documents/{doc_id}",
     response_model=ApiResponse[None],
     summary="Unlink a Google Doc",
+    responses={403: {"description": "Only owner or instructor can unlink documents."}},
 )
 async def remove_document(
     group_id: str,
@@ -432,7 +436,7 @@ async def remove_document(
     db: AsyncSession = Depends(get_db),
 ):
     group = await get_group_or_404(group_id, db)
-    await require_owner(group, current_user)
+    await require_owner_or_instructor(group, current_user, db)
     doc = await db.get(GroupGoogleDoc, doc_id)
     if doc is None or doc.group_id != group.id:
         raise HTTPException(
@@ -447,6 +451,7 @@ async def remove_document(
     "/{group_id}/sync",
     response_model=ApiResponse[SyncOut],
     summary="Sync group participation data from GitHub and Google",
+    responses={403: {"description": "Only owner or instructor can sync data."}},
 )
 async def sync_group(
     group_id: str,
@@ -454,7 +459,7 @@ async def sync_group(
     db: AsyncSession = Depends(get_db),
 ):
     group = await get_group_or_404(group_id, db)
-    await require_owner(group, current_user)
+    await require_owner_or_instructor(group, current_user, db)
     result = await sync_group_participation(group, db)
     return success(
         data=result,
