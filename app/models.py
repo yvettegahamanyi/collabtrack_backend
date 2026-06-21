@@ -1,10 +1,11 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     Enum as SAEnum,
     Float,
@@ -87,6 +88,26 @@ class GroupMemberRole(str, enum.Enum):
     INSTRUCTOR = "INSTRUCTOR"
 
 
+class AccountStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    PENDING = "PENDING"
+
+
+class MeetingSessionStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    UPLOADED = "UPLOADED"
+    NEEDS_MAPPING = "NEEDS_MAPPING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class MeetingFileType(str, enum.Enum):
+    ATTENDANCE = "ATTENDANCE"
+    TRANSCRIPT = "TRANSCRIPT"
+    CHAT = "CHAT"
+
+
 # ---------------------------------------------------------------------------
 # Tables
 # ---------------------------------------------------------------------------
@@ -101,6 +122,21 @@ class User(Base):
     role: Mapped[RoleType | None] = mapped_column(SAEnum(RoleType), nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    account_status: Mapped[AccountStatus] = mapped_column(
+        SAEnum(AccountStatus),
+        default=AccountStatus.ACTIVE,
+        server_default=text("'ACTIVE'"),
+        nullable=False,
+    )
+    has_logged_in: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    provisioned_by_instructor_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -251,6 +287,15 @@ class ProjectGroup(Base):
     participation_snapshots: Mapped[list["ParticipationSnapshot"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
+    meeting_sessions: Mapped[list["MeetingSession"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+    meeting_name_mappings: Mapped[list["MeetingNameMapping"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+    engagement_scores: Mapped[list["EngagementScore"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
 
 
 class GroupMembership(Base):
@@ -371,6 +416,119 @@ class PasswordResetToken(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="password_reset_tokens")
+
+
+class MeetingSession(Base):
+    __tablename__ = "meeting_sessions"
+    __table_args__ = (
+        UniqueConstraint("group_id", "session_date", name="uq_meeting_group_date"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    session_label: Mapped[str] = mapped_column(String)
+    session_date: Mapped[date] = mapped_column(Date)
+    duration_minutes: Mapped[int] = mapped_column(Integer)
+    status: Mapped[MeetingSessionStatus] = mapped_column(
+        SAEnum(MeetingSessionStatus),
+        default=MeetingSessionStatus.PENDING,
+        server_default=text("'PENDING'"),
+        nullable=False,
+    )
+    uploaded_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    uploaded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unmapped_names: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    group: Mapped["ProjectGroup"] = relationship(back_populates="meeting_sessions")
+    uploaded_by_user: Mapped["User | None"] = relationship(foreign_keys=[uploaded_by])
+    files: Mapped[list["MeetingSessionFile"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+    raw_metrics: Mapped[list["MeetingRawMetric"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class MeetingSessionFile(Base):
+    __tablename__ = "meeting_session_files"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    meeting_session_id: Mapped[str] = mapped_column(ForeignKey("meeting_sessions.id"))
+    file_type: Mapped[MeetingFileType] = mapped_column(SAEnum(MeetingFileType))
+    storage_path: Mapped[str] = mapped_column(String)
+    original_filename: Mapped[str] = mapped_column(String)
+    uploaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    session: Mapped["MeetingSession"] = relationship(back_populates="files")
+
+
+class MeetingNameMapping(Base):
+    __tablename__ = "meeting_name_mappings"
+    __table_args__ = (
+        UniqueConstraint("group_id", "display_name", name="uq_meeting_mapping_group_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    display_name: Mapped[str] = mapped_column(String)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped["ProjectGroup"] = relationship(back_populates="meeting_name_mappings")
+    user: Mapped["User"] = relationship()
+
+
+class MeetingRawMetric(Base):
+    __tablename__ = "meeting_raw_metrics"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    meeting_session_id: Mapped[str] = mapped_column(ForeignKey("meeting_sessions.id"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    duration_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    was_facilitator: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    speaking_turns: Mapped[int] = mapped_column(Integer, default=0)
+    chat_messages: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    session: Mapped["MeetingSession"] = relationship(back_populates="raw_metrics")
+    user: Mapped["User"] = relationship()
+
+
+class EngagementScore(Base):
+    __tablename__ = "engagement_scores"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_engagement_group_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    attendance_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    speaking_ratio: Mapped[float] = mapped_column(Float, default=0.0)
+    chat_participation: Mapped[float] = mapped_column(Float, default=0.0)
+    meeting_lead_count: Mapped[int] = mapped_column(Integer, default=0)
+    sessions_attended: Mapped[int] = mapped_column(Integer, default=0)
+    total_sessions: Mapped[int] = mapped_column(Integer, default=0)
+    last_updated: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped["ProjectGroup"] = relationship(back_populates="engagement_scores")
+    user: Mapped["User"] = relationship()
 
 
 class CollabTrackDataset(Base):

@@ -1,8 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.models import GroupMemberRole, ServiceType
+from app.models import AccountStatus, GroupMemberRole, ServiceType
 
 
 class GroupCreate(BaseModel):
@@ -40,6 +40,22 @@ class MemberOut(BaseModel):
     role: GroupMemberRole
     is_owner: bool
     joined_at: datetime
+    account_status: AccountStatus | None = None
+
+
+class AddGroupMemberRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120, examples=["Jane Doe"])
+    email: EmailStr = Field(examples=["jane@university.edu"])
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.lower()
 
 
 class GroupDetailOut(GroupOut):

@@ -21,6 +21,7 @@ class LoginRequest(BaseModel):
 class Token(BaseModel):
     access_token: str = Field(examples=["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."])
     token_type: str = "bearer"
+    must_change_password: bool = False
 
 
 class AuthResponse(Token):

@@ -19,6 +19,7 @@ def serialize_members(
             role=membership.role,
             is_owner=membership.user_id == group.owner_id,
             joined_at=membership.joined_at,
+            account_status=membership.user.account_status,
         )
         for membership in ordered
     ]

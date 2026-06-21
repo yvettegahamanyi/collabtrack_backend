@@ -18,7 +18,7 @@ from app.core.security import (
     verify_password,
 )
 from app.database import get_db
-from app.models import PasswordResetToken, User
+from app.models import AccountStatus, PasswordResetToken, User
 from app.schemas.auth import (
     AuthResponse,
     LoginRequest,
@@ -67,6 +67,7 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
         name=payload.name,
         password_hash=hash_password(payload.password),
         is_active=True,
+        account_status=AccountStatus.ACTIVE,
     )
     db.add(user)
     await db.flush()
@@ -111,9 +112,17 @@ async def login(
             detail="This account has been deactivated.",
         )
 
+    user.has_logged_in = True
+    if user.account_status == AccountStatus.PENDING:
+        user.account_status = AccountStatus.ACTIVE
+    db.add(user)
+
     token = create_access_token(subject=user.id)
     return success(
-        data=Token(access_token=token),
+        data=Token(
+            access_token=token,
+            must_change_password=user.must_change_password,
+        ),
         message="Login successful.",
         code=status.HTTP_200_OK,
     )
@@ -182,6 +191,7 @@ async def reset_password(payload: ResetPassword, db: AsyncSession = Depends(get_
         )
 
     user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
     reset.used = True
     return success(
         message="Password has been reset successfully.",

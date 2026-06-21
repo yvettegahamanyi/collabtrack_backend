@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.models import (
     GroupGithubRepo,
     GroupGoogleDoc,
+    GroupMemberRole,
     GroupMembership,
     IntegrationProvider,
     ParticipationSnapshot,
@@ -22,10 +23,13 @@ from app.schemas.participation import (
     MemberParticipationOut,
     SyncOut,
 )
+from app.schemas.meetings import MeetingEngagementMetrics
+from app.services.meetings import get_engagement_scores_by_user
 from app.services.github_sync import (
     GithubSyncResult,
     merge_github_results,
     sync_github_repo,
+    sync_github_repo_by_email,
 )
 from app.services.google_sync import (
     GoogleSyncResult,
@@ -41,6 +45,16 @@ from app.services.integrations import (
 
 _GITHUB_API = "https://api.github.com"
 _MIN_SYNC_INTERVAL_SECONDS = 60
+
+
+def _student_memberships(
+    memberships: list[GroupMembership],
+) -> list[GroupMembership]:
+    return [
+        membership
+        for membership in memberships
+        if membership.role != GroupMemberRole.INSTRUCTOR
+    ]
 
 
 async def link_github_repo(
@@ -108,7 +122,7 @@ async def sync_group_participation(
         .where(GroupMembership.group_id == group.id)
         .options(selectinload(GroupMembership.user))
     )
-    member_list = list(memberships.all())
+    member_list = _student_memberships(list(memberships.all()))
     if not member_list:
         synced_at = datetime.now(timezone.utc)
         return SyncOut(
@@ -116,6 +130,7 @@ async def sync_group_participation(
         )
 
     github_logins: dict[str, str] = {}
+    github_emails: dict[str, str] = {}
     google_emails: dict[str, str] = {}
     integrations_by_user: dict[str, dict[str, UserIntegration | None]] = {}
 
@@ -130,23 +145,39 @@ async def sync_group_participation(
         integrations_by_user[user.id] = {"github": gh, "google": goog}
         if gh and gh.provider_login:
             github_logins[user.id] = gh.provider_login
+        else:
+            github_emails[user.id] = user.email.lower()
         if goog and goog.provider_email:
             google_emails[user.id] = goog.provider_email.lower()
+        else:
+            google_emails[user.id] = user.email.lower()
 
     github_result = GithubSyncResult()
     repos = await db.scalars(
         select(GroupGithubRepo).where(GroupGithubRepo.group_id == group.id)
     )
     github_token = await _find_github_token_for_group(group, db)
+    repo_list = list(repos.all())
     if github_token and github_logins:
         login_set = set(github_logins.values())
-        for repo in repos.all():
+        for repo in repo_list:
             repo_result = await sync_github_repo(
                 access_token=github_token,
                 owner=repo.owner,
                 repo=repo.repo,
                 since=group.created_at,
                 logins=login_set,
+            )
+            merge_github_results(github_result, repo_result)
+    if github_token and github_emails:
+        email_set = set(github_emails.values())
+        for repo in repo_list:
+            repo_result = await sync_github_repo_by_email(
+                access_token=github_token,
+                owner=repo.owner,
+                repo=repo.repo,
+                since=group.created_at,
+                emails=email_set,
             )
             merge_github_results(github_result, repo_result)
 
@@ -180,11 +211,19 @@ async def sync_group_participation(
             gh_metrics = github_result.by_login.get(login)
             if gh_metrics:
                 metrics["github"] = gh_metrics.model_dump()
+        else:
+            email = user.email.lower()
+            gh_metrics = github_result.by_email.get(email)
+            if gh_metrics:
+                metrics["github"] = gh_metrics.model_dump()
+
         if goog_integration and goog_integration.provider_email:
             email = goog_integration.provider_email.lower()
-            g_metrics = google_result.by_email.get(email)
-            if g_metrics:
-                metrics["google_docs"] = g_metrics.model_dump()
+        else:
+            email = user.email.lower()
+        g_metrics = google_result.by_email.get(email)
+        if g_metrics:
+            metrics["google_docs"] = g_metrics.model_dump()
 
         snapshot = await db.scalar(
             select(ParticipationSnapshot).where(
@@ -222,19 +261,27 @@ async def get_contributions(
         .where(GroupMembership.group_id == group.id)
         .options(selectinload(GroupMembership.user))
     )
-    snapshots = await db.scalars(
-        select(ParticipationSnapshot).where(
-            ParticipationSnapshot.group_id == group.id
+    student_members = _student_memberships(list(memberships.all()))
+    student_user_ids = {membership.user_id for membership in student_members}
+
+    snapshot_by_user: dict[str, ParticipationSnapshot] = {}
+    if student_user_ids:
+        snapshots = await db.scalars(
+            select(ParticipationSnapshot).where(
+                ParticipationSnapshot.group_id == group.id,
+                ParticipationSnapshot.user_id.in_(student_user_ids),
+            )
         )
-    )
-    snapshot_by_user = {s.user_id: s for s in snapshots.all()}
+        snapshot_by_user = {s.user_id: s for s in snapshots.all()}
+
+    engagement_by_user = await get_engagement_scores_by_user(group.id, db)
 
     last_synced_at = None
     if snapshot_by_user:
         last_synced_at = max(s.synced_at for s in snapshot_by_user.values())
 
     members: list[MemberParticipationOut] = []
-    for membership in memberships.all():
+    for membership in student_members:
         user = membership.user
         gh = await get_user_integration(
             db, user.id, IntegrationProvider.github
@@ -254,17 +301,31 @@ async def get_contributions(
                     **snapshot.metrics["google_docs"]
                 )
 
+        engagement_score = engagement_by_user.get(user.id)
+        meeting_engagement = None
+        if engagement_score is not None:
+            meeting_engagement = MeetingEngagementMetrics(
+                attendance_ratio=engagement_score.attendance_ratio,
+                speaking_ratio=engagement_score.speaking_ratio,
+                chat_participation=engagement_score.chat_participation,
+                meeting_lead_count=engagement_score.meeting_lead_count,
+                sessions_attended=engagement_score.sessions_attended,
+                total_sessions=engagement_score.total_sessions,
+            )
+
         members.append(
             MemberParticipationOut(
                 user_id=user.id,
                 name=user.name,
                 email=user.email,
+                account_status=user.account_status,
                 github_connected=gh is not None,
                 google_connected=goog is not None,
                 github_login=gh.provider_login if gh else None,
                 google_email_matched=goog.email_matched if goog else None,
-                github=github_metrics if gh else None,
-                google_docs=google_metrics if goog else None,
+                github=github_metrics,
+                google_docs=google_metrics,
+                meeting_engagement=meeting_engagement,
             )
         )
 
@@ -278,6 +339,23 @@ async def get_contributions(
 async def get_member_participation(
     group: ProjectGroup, user_id: str, db: AsyncSession
 ) -> MemberParticipationOut:
+    membership = await db.scalar(
+        select(GroupMembership).where(
+            GroupMembership.group_id == group.id,
+            GroupMembership.user_id == user_id,
+        )
+    )
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Member not found in this group.",
+        )
+    if membership.role == GroupMemberRole.INSTRUCTOR:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Participation is not tracked for instructors.",
+        )
+
     contributions = await get_contributions(group, db)
     for member in contributions.members:
         if member.user_id == user_id:

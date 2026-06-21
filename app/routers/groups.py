@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -28,6 +28,7 @@ from app.models import (
     User,
 )
 from app.schemas.group import (
+    AddGroupMemberRequest,
     GroupCreate,
     GroupDetailOut,
     GroupOut,
@@ -44,6 +45,10 @@ from app.schemas.integration import (
     RepoOut,
 )
 from app.schemas.participation import ContributionsOut, MemberParticipationOut, SyncOut
+from app.services.group_members import (
+    add_member_if_missing,
+    require_instructor_can_manage_group,
+)
 from app.services.groups import (
     get_group_members,
     get_group_or_404,
@@ -62,6 +67,23 @@ from app.services.participation import (
     link_google_doc,
     sync_group_participation,
 )
+from app.schemas.meetings import (
+    GroupEngagementReport,
+    MeetingSessionCreate,
+    MeetingSessionOut,
+    NameMappingSubmit,
+)
+from app.services.meetings import (
+    create_meeting_session,
+    delete_meeting_session,
+    get_group_engagement_report,
+    get_meeting_session_or_404,
+    list_meeting_sessions,
+    serialize_session,
+    submit_name_mappings,
+    upload_meeting_files,
+)
+from app.services.user_provisioning import get_or_create_student
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -71,19 +93,25 @@ router = APIRouter(prefix="/groups", tags=["groups"])
     response_model=ApiResponse[GroupOut],
     status_code=status.HTTP_201_CREATED,
     summary="Create a new project group",
-    responses={403: {"description": "Only students can create groups."}},
+    responses={403: {"description": "Only students or instructors can create groups."}},
 )
 async def create_group(
     payload: GroupCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a group. The authenticated student becomes the group owner."""
-    if current_user.role != RoleType.STUDENT:
+    """Create a group. Students and instructors become the group owner."""
+    if current_user.role not in (RoleType.STUDENT, RoleType.INSTRUCTOR):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only students can create groups.",
+            detail="Only students or instructors can create groups.",
         )
+
+    membership_role = (
+        GroupMemberRole.INSTRUCTOR
+        if current_user.role == RoleType.INSTRUCTOR
+        else GroupMemberRole.STUDENT
+    )
 
     group = ProjectGroup(
         group_name=payload.group_name,
@@ -97,7 +125,7 @@ async def create_group(
     membership = GroupMembership(
         group_id=group.id,
         user_id=current_user.id,
-        role=GroupMemberRole.STUDENT,
+        role=membership_role,
     )
     db.add(membership)
     return success(
@@ -263,6 +291,47 @@ async def list_members(
     return success(
         data=serialize_members(group, memberships),
         message="Group members retrieved successfully.",
+    )
+
+
+@router.post(
+    "/{group_id}/members",
+    response_model=ApiResponse[GroupDetailOut],
+    summary="Add a student member to a group",
+    responses={
+        403: {"description": "Only instructors can add roster members."},
+        404: {"description": "Group not found."},
+        409: {"description": "Email belongs to a non-student user."},
+    },
+)
+async def add_group_member(
+    group_id: str,
+    payload: AddGroupMemberRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Provision or attach a student by email and add them to the group roster."""
+    group = await get_group_or_404(group_id, db)
+    await require_instructor_can_manage_group(group, current_user, db)
+
+    student = await get_or_create_student(
+        db,
+        email=payload.email,
+        name=payload.name,
+        instructor_id=current_user.id,
+    )
+
+    await add_member_if_missing(
+        db,
+        group_id=group.id,
+        user_id=student.id,
+        role=GroupMemberRole.STUDENT,
+    )
+
+    memberships = await get_group_members(group, db)
+    return success(
+        data=serialize_group_detail(group, memberships),
+        message="Member added successfully.",
     )
 
 
@@ -503,4 +572,164 @@ async def get_member_participation_endpoint(
     return success(
         data=data,
         message="Participation retrieved successfully.",
+    )
+
+
+@router.post(
+    "/{group_id}/meetings",
+    response_model=ApiResponse[MeetingSessionOut],
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a meeting session",
+    responses={403: {"description": "Only owner or instructor can create sessions."}},
+)
+async def create_meeting(
+    group_id: str,
+    payload: MeetingSessionCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner_or_instructor(group, current_user, db)
+    session = await create_meeting_session(group, payload, current_user, db)
+    return success(
+        data=serialize_session(session),
+        message="Meeting session created successfully.",
+        code=status.HTTP_201_CREATED,
+    )
+
+
+@router.get(
+    "/{group_id}/meetings",
+    response_model=ApiResponse[list[MeetingSessionOut]],
+    summary="List meeting sessions",
+)
+async def list_meetings(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    data = await list_meeting_sessions(group.id, db)
+    return success(
+        data=data,
+        message="Meeting sessions retrieved successfully.",
+    )
+
+
+@router.get(
+    "/{group_id}/meetings/{meeting_id}",
+    response_model=ApiResponse[MeetingSessionOut],
+    summary="Get meeting session detail",
+)
+async def get_meeting(
+    group_id: str,
+    meeting_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    session = await get_meeting_session_or_404(group.id, meeting_id, db)
+    return success(
+        data=serialize_session(session),
+        message="Meeting session retrieved successfully.",
+    )
+
+
+@router.post(
+    "/{group_id}/meetings/{meeting_id}/upload",
+    response_model=ApiResponse[MeetingSessionOut],
+    summary="Upload meeting session files",
+    responses={403: {"description": "Only owner or instructor can upload files."}},
+)
+async def upload_meeting(
+    group_id: str,
+    meeting_id: str,
+    background_tasks: BackgroundTasks,
+    attendance_file: UploadFile = File(...),
+    transcript_file: UploadFile = File(...),
+    chat_file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner_or_instructor(group, current_user, db)
+    session = await get_meeting_session_or_404(group.id, meeting_id, db)
+    data = await upload_meeting_files(
+        session,
+        attendance_file=attendance_file,
+        transcript_file=transcript_file,
+        chat_file=chat_file,
+        user=current_user,
+        db=db,
+        background_tasks=background_tasks,
+    )
+    return success(
+        data=data,
+        message="Meeting files uploaded successfully.",
+    )
+
+
+@router.post(
+    "/{group_id}/meetings/{meeting_id}/mapping",
+    response_model=ApiResponse[MeetingSessionOut],
+    summary="Submit name-to-member mappings",
+    responses={403: {"description": "Only owner or instructor can submit mappings."}},
+)
+async def submit_meeting_mapping(
+    group_id: str,
+    meeting_id: str,
+    payload: NameMappingSubmit,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner_or_instructor(group, current_user, db)
+    session = await get_meeting_session_or_404(group.id, meeting_id, db)
+    data = await submit_name_mappings(
+        session, payload, db, background_tasks
+    )
+    return success(
+        data=data,
+        message="Name mappings submitted successfully.",
+    )
+
+
+@router.delete(
+    "/{group_id}/meetings/{meeting_id}",
+    response_model=ApiResponse[None],
+    summary="Delete a meeting session",
+    responses={403: {"description": "Only owner or instructor can delete sessions."}},
+)
+async def delete_meeting(
+    group_id: str,
+    meeting_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner_or_instructor(group, current_user, db)
+    session = await get_meeting_session_or_404(group.id, meeting_id, db)
+    await delete_meeting_session(session, db)
+    return success(message="Meeting session deleted.")
+
+
+@router.get(
+    "/{group_id}/engagement",
+    response_model=ApiResponse[GroupEngagementReport],
+    summary="Get aggregated meeting engagement report",
+)
+async def get_group_engagement(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    data = await get_group_engagement_report(group, db)
+    return success(
+        data=data,
+        message="Engagement report retrieved successfully.",
     )

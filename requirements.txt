@@ -13,3 +13,5 @@ email-validator
 python-multipart
 httpx
 cryptography
+boto3
+pydantic-settings

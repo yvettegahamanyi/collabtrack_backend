@@ -32,5 +32,8 @@ htmlcov/
 # Logs
 *.log
 
+# Uploaded meeting session files
+uploads/
+
 #cursor
 .cursor/
