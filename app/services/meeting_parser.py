@@ -16,6 +16,7 @@ class MeetingParseError(Exception):
 class AttendanceRecord:
     duration_minutes: int
     was_facilitator: bool
+    email: str | None = None
 
 
 @dataclass
@@ -41,7 +42,7 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
     if reader.fieldnames is None:
         raise MeetingParseError("Attendance CSV is empty or missing a header row.")
 
-    required = {"Student_ID", "Duration_Minutes", "Facilitator"}
+    required = {"Name", "Duration_Minutes", "Facilitator"}
     missing = required - set(reader.fieldnames)
     if missing:
         raise MeetingParseError(
@@ -50,8 +51,8 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
 
     attendance: dict[str, AttendanceRecord] = {}
     for row_num, row in enumerate(reader, start=2):
-        student_id = (row.get("Student_ID") or "").strip()
-        if not student_id:
+        name = (row.get("Name") or "").strip()
+        if not name:
             continue
 
         duration_raw = (row.get("Duration_Minutes") or "").strip()
@@ -60,6 +61,9 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
             raise MeetingParseError(
                 f"Attendance CSV row {row_num}: Duration_Minutes and Facilitator are required."
             )
+
+        email_raw = (row.get("Email") or "").strip()
+        email = email_raw.lower() if email_raw else None
 
         try:
             duration = int(duration_raw)
@@ -73,9 +77,10 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
                 f"Attendance CSV row {row_num}: Duration_Minutes must be non-negative."
             )
 
-        attendance[student_id] = AttendanceRecord(
+        attendance[name] = AttendanceRecord(
             duration_minutes=duration,
             was_facilitator=parse_facilitator(facilitator_raw),
+            email=email,
         )
 
     if not attendance:
