@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from functools import lru_cache
 
@@ -8,6 +9,15 @@ from botocore.client import Config
 from fastapi import UploadFile
 
 from app.core.config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
+
+_S3_CLIENT_CONFIG = Config(
+    signature_version="s3v4",
+    connect_timeout=5,
+    read_timeout=10,
+    retries={"max_attempts": 2, "mode": "standard"},
+)
 
 
 def _require_s3_settings() -> Settings:
@@ -38,7 +48,7 @@ def get_s3_client():
         aws_access_key_id=settings.S3_ACCESS_KEY_ID,
         aws_secret_access_key=settings.S3_SECRET_ACCESS_KEY,
         region_name=settings.S3_REGION,
-        config=Config(signature_version="s3v4"),
+        config=_S3_CLIENT_CONFIG,
     )
 
 
@@ -102,14 +112,38 @@ def download_file(key: str) -> bytes:
     return response["Body"].read()
 
 
-def delete_file(key: str) -> None:
-    settings = _require_s3_settings()
-    get_s3_client().delete_object(
-        Bucket=settings.S3_BUCKET_NAME,
-        Key=key,
+def _s3_is_configured() -> bool:
+    settings = get_settings()
+    return bool(
+        settings.S3_ENDPOINT_URL
+        and settings.S3_BUCKET_NAME
+        and settings.S3_ACCESS_KEY_ID
+        and settings.S3_SECRET_ACCESS_KEY
     )
 
 
+def delete_file(key: str) -> None:
+    delete_files([key])
+
+
 def delete_files(keys: list[str]) -> None:
-    for key in keys:
-        delete_file(key)
+    """Best-effort object storage cleanup. Never raises — delete must not hang."""
+    if not keys or not _s3_is_configured():
+        return
+
+    try:
+        settings = get_settings()
+        client = get_s3_client()
+        client.delete_objects(
+            Bucket=settings.S3_BUCKET_NAME,
+            Delete={
+                "Objects": [{"Key": key} for key in keys],
+                "Quiet": True,
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not delete %d object(s) from storage: %s",
+            len(keys),
+            exc,
+        )

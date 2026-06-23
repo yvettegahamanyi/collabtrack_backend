@@ -262,10 +262,13 @@ async def delete_meeting_session(
     session: MeetingSession, db: AsyncSession
 ) -> None:
     group_id = session.group_id
-    await _remove_session_files(session, db)
+    was_completed = session.status == MeetingSessionStatus.COMPLETED
+    storage_keys = await _detach_session_files(session, db)
     await db.delete(session)
     await db.flush()
-    await recalculate_group_engagement(group_id, db)
+    if was_completed:
+        await recalculate_group_engagement(group_id, db)
+    delete_files(storage_keys)
 
 
 async def get_group_engagement_report(
@@ -323,15 +326,17 @@ async def get_engagement_scores_by_user(
     return {score.user_id: score for score in scores.all()}
 
 
-async def _remove_session_files(session: MeetingSession, db: AsyncSession) -> None:
+async def _detach_session_files(
+    session: MeetingSession, db: AsyncSession
+) -> list[str]:
+    """Remove file records from the DB and return storage keys for cleanup."""
     files = await db.scalars(
         select(MeetingSessionFile).where(
             MeetingSessionFile.meeting_session_id == session.id
         )
     )
     file_rows = list(files.all())
-    if file_rows:
-        delete_files([record.storage_path for record in file_rows])
+    storage_keys = [record.storage_path for record in file_rows]
 
     for record in file_rows:
         await db.delete(record)
@@ -341,3 +346,9 @@ async def _remove_session_files(session: MeetingSession, db: AsyncSession) -> No
             MeetingSessionFile.meeting_session_id == session.id
         )
     )
+    return storage_keys
+
+
+async def _remove_session_files(session: MeetingSession, db: AsyncSession) -> None:
+    storage_keys = await _detach_session_files(session, db)
+    delete_files(storage_keys)
