@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -646,7 +646,6 @@ async def get_meeting(
 async def upload_meeting(
     group_id: str,
     meeting_id: str,
-    background_tasks: BackgroundTasks,
     attendance_file: UploadFile = File(...),
     transcript_file: UploadFile = File(...),
     chat_file: UploadFile = File(...),
@@ -663,7 +662,6 @@ async def upload_meeting(
         chat_file=chat_file,
         user=current_user,
         db=db,
-        background_tasks=background_tasks,
     )
     return success(
         data=data,
@@ -681,16 +679,13 @@ async def submit_meeting_mapping(
     group_id: str,
     meeting_id: str,
     payload: NameMappingSubmit,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     group = await get_group_or_404(group_id, db)
     await require_owner_or_instructor(group, current_user, db)
     session = await get_meeting_session_or_404(group.id, meeting_id, db)
-    data = await submit_name_mappings(
-        session, payload, db, background_tasks
-    )
+    data = await submit_name_mappings(session, payload, db)
     return success(
         data=data,
         message="Name mappings submitted successfully.",

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import BackgroundTasks, HTTPException, UploadFile, status
+from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -116,6 +116,15 @@ async def get_meeting_session_or_404(
     return session
 
 
+async def _process_and_refresh_session(
+    session: MeetingSession, db: AsyncSession
+) -> MeetingSession:
+    """Commit pending changes, process files inline, return the updated session."""
+    await db.commit()
+    await process_meeting_session(session.id, session.group_id)
+    return await get_meeting_session_or_404(session.group_id, session.id, db)
+
+
 async def upload_meeting_files(
     session: MeetingSession,
     *,
@@ -124,7 +133,6 @@ async def upload_meeting_files(
     chat_file: UploadFile,
     user: User,
     db: AsyncSession,
-    background_tasks: BackgroundTasks,
 ) -> MeetingSessionOut:
     if session.status not in (
         MeetingSessionStatus.PENDING,
@@ -193,9 +201,7 @@ async def upload_meeting_files(
     db.add(session)
     await db.flush()
 
-    background_tasks.add_task(
-        process_meeting_session, session.id, session.group_id
-    )
+    session = await _process_and_refresh_session(session, db)
     return serialize_session(session)
 
 
@@ -203,7 +209,6 @@ async def submit_name_mappings(
     session: MeetingSession,
     payload: NameMappingSubmit,
     db: AsyncSession,
-    background_tasks: BackgroundTasks,
 ) -> MeetingSessionOut:
     if session.status != MeetingSessionStatus.NEEDS_MAPPING:
         raise HTTPException(
@@ -249,9 +254,7 @@ async def submit_name_mappings(
     db.add(session)
     await db.flush()
 
-    background_tasks.add_task(
-        process_meeting_session, session.id, session.group_id
-    )
+    session = await _process_and_refresh_session(session, db)
     return serialize_session(session)
 
 
