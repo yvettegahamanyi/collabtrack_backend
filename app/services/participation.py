@@ -1,8 +1,6 @@
-import json
 import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 import httpx
 from fastapi import HTTPException, status
@@ -370,28 +368,6 @@ async def sync_group_participation(
                     metrics.edits + metrics.comments
                     for metrics in doc_result.by_email.values()
                 )
-                # #region agent log
-                _debug_log(
-                    "H5",
-                    "participation.py:sync_group_participation:token_attempt",
-                    "Google token attempt for doc sync",
-                    {
-                        "group_id": group.id,
-                        "file_id": doc.file_id,
-                        "provider_email": provider_email,
-                        "revisions_status": doc_status.revisions_status,
-                        "activity_status": doc_status.activity_status,
-                        "activity_scope_granted": doc_status.activity_scope_granted,
-                        "people_lookup_scope_granted": doc_status.people_lookup_scope_granted,
-                        "activity_source": doc_status.activity_source,
-                        "failure_kind": doc_status.failure_kind,
-                        "match_score": match_score,
-                        "revision_count": doc_status.revision_count,
-                        "activity_edit_count": doc_status.activity_edit_count,
-                        "matched_emails": doc_status.matched_emails,
-                    },
-                )
-                # #endregion
                 if (
                     doc_status.revisions_status != 200
                     and doc_status.activity_status != 200
@@ -405,21 +381,6 @@ async def sync_group_participation(
             if best_result is not None:
                 merge_google_results(google_result, best_result)
 
-            # #region agent log
-            _debug_log(
-                "H-WARN",
-                "participation.py:sync_group_participation:scope_warning",
-                "Google scope availability for sync warnings",
-                {
-                    "group_id": group.id,
-                    "file_id": doc.file_id,
-                    "google_token_count": len(google_tokens),
-                    "people_lookup_scope_available": people_lookup_scope_available,
-                    "activity_scope_available": activity_scope_available,
-                    "best_score": best_score,
-                },
-            )
-            # #endregion
             if google_tokens and not people_lookup_scope_available:
                 sync_warnings.append(
                     f'Edit counts for "{doc.title}" may miss domain-wide editors. '
@@ -458,7 +419,6 @@ async def sync_group_participation(
 
     synced_at = datetime.now(timezone.utc)
     members_synced = 0
-    google_member_assignment: list[dict] = []
 
     github_metrics_by_user = _assign_github_metrics(
         member_list, integrations_by_user, github_result
@@ -481,15 +441,6 @@ async def sync_group_participation(
             metrics["google_docs"] = g_metrics.model_dump()
         if g_events:
             metrics["google_docs_events"] = [event.to_dict() for event in g_events]
-        google_member_assignment.append(
-            {
-                "user_id": user.id,
-                "lookup_email": lookup_email,
-                "has_google_docs_metrics": g_metrics is not None,
-                "edits": g_metrics.edits if g_metrics else 0,
-                "comments": g_metrics.comments if g_metrics else 0,
-            }
-        )
 
         snapshot = await db.scalar(
             select(ParticipationSnapshot).where(

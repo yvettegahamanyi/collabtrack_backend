@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 import httpx
 
@@ -394,33 +391,10 @@ async def _build_directory_person_map_from_members(
             },
         )
         if resp.status_code != 200:
-            # #region agent log
-            _debug_log(
-                "H13",
-                "google_sync.py:_build_directory_person_map:failed",
-                "Directory people search failed",
-                {
-                    "query": query,
-                    "status": resp.status_code,
-                    "error": resp.text[:300],
-                },
-            )
-            # #endregion
             continue
         payload = resp.json()
         people = payload.get("people") or []
         if not people:
-            # #region agent log
-            _debug_log(
-                "H15",
-                "google_sync.py:_build_directory_person_map:empty",
-                "Directory people search returned no results",
-                {
-                    "query": query,
-                    "total_size": payload.get("totalSize"),
-                },
-            )
-            # #endregion
             continue
         for person in people:
             resource_name = person.get("resourceName")
@@ -456,19 +430,6 @@ async def _build_directory_person_map_from_members(
                         break
             if matched_canonical:
                 person_map[resource_name] = matched_canonical
-                # #region agent log
-                _debug_log(
-                    "H14",
-                    "google_sync.py:_build_directory_person_map:matched",
-                    "Directory person mapped to signup email",
-                    {
-                        "query": query,
-                        "resource_name": resource_name,
-                        "canonical_email": matched_canonical,
-                        "directory_emails": directory_emails,
-                    },
-                )
-                # #endregion
     return person_map
 
 
