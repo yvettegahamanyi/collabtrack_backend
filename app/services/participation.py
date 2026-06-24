@@ -394,6 +394,7 @@ async def sync_group_participation(
             best_result: GoogleSyncResult | None = None
             best_score = -1
             activity_scope_missing = False
+            people_lookup_scope_missing = False
             for provider_email, token in google_tokens:
                 doc_result, doc_status = await sync_google_doc(
                     access_token=token,
@@ -409,6 +410,8 @@ async def sync_group_participation(
                     or doc_status.activity_status == 403
                 ):
                     activity_scope_missing = True
+                if not doc_status.people_lookup_scope_granted:
+                    people_lookup_scope_missing = True
                 match_score = sum(
                     metrics.edits + metrics.comments
                     for metrics in doc_result.by_email.values()
@@ -425,6 +428,7 @@ async def sync_group_participation(
                         "revisions_status": doc_status.revisions_status,
                         "activity_status": doc_status.activity_status,
                         "activity_scope_granted": doc_status.activity_scope_granted,
+                        "people_lookup_scope_granted": doc_status.people_lookup_scope_granted,
                         "activity_source": doc_status.activity_source,
                         "failure_kind": doc_status.failure_kind,
                         "match_score": match_score,
@@ -447,12 +451,20 @@ async def sync_group_participation(
             if best_result is not None:
                 merge_google_results(google_result, best_result)
 
+            if people_lookup_scope_missing:
+                sync_warnings.append(
+                    f'Edit counts for "{doc.title}" may miss domain-wide editors. '
+                    "Disconnect then Connect Google in Settings so CollabTrack "
+                    "can access contacts.readonly and directory.readonly scopes, "
+                    "then sync again."
+                )
             if activity_scope_missing:
                 sync_warnings.append(
-                    f'Edit counts for "{doc.title}" may be incomplete. Each group '
-                    "member must Disconnect then Connect Google in Settings so "
-                    "CollabTrack can access Drive Activity and People API (needed "
-                    "to identify domain-wide editors), then sync again."
+                    f'Edit counts for "{doc.title}" may be incomplete. '
+                    "Reconnect Google in Settings (Disconnect → Connect) so "
+                    "CollabTrack can access Drive Activity. For domain-wide docs, "
+                    "the file owner is matched automatically; other editors may "
+                    "need to connect Google or be individually shared on the doc."
                 )
 
             if (

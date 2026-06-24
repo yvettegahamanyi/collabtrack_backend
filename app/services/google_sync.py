@@ -90,6 +90,7 @@ class GoogleDocSyncStatus:
     metadata_status: int | None = None
     activity_source: str | None = None  # activity | revisions | none
     activity_scope_granted: bool = False
+    people_lookup_scope_granted: bool = False
 
 
 @dataclass
@@ -323,6 +324,67 @@ async def _token_has_activity_scope(
     return "drive.activity.readonly" in scope
 
 
+async def _token_has_people_lookup_scope(
+    client: httpx.AsyncClient,
+    access_token: str,
+) -> bool:
+    resp = await client.get(
+        "https://www.googleapis.com/oauth2/v1/tokeninfo",
+        params={"access_token": access_token},
+    )
+    if resp.status_code != 200:
+        return False
+    scope = str(resp.json().get("scope") or "")
+    return (
+        "contacts.readonly" in scope
+        or "directory.readonly" in scope
+    )
+
+
+async def _build_directory_person_map_from_members(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    signup_emails: set[str],
+) -> dict[str, str]:
+    """Map domain directory person resourceNames to CollabTrack signup emails."""
+    person_map: dict[str, str] = {}
+    for email in signup_emails:
+        resp = await client.get(
+            "https://people.googleapis.com/v1/people:searchDirectoryPeople",
+            headers=headers,
+            params={
+                "query": email,
+                "readMask": "emailAddresses",
+                "sources": "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE",
+                "pageSize": 5,
+            },
+        )
+        if resp.status_code != 200:
+            # #region agent log
+            _debug_log(
+                "H13",
+                "google_sync.py:_build_directory_person_map:failed",
+                "Directory people search failed",
+                {
+                    "email": email,
+                    "status": resp.status_code,
+                    "error": resp.text[:300],
+                },
+            )
+            # #endregion
+            continue
+        for person in resp.json().get("people") or []:
+            resource_name = person.get("resourceName")
+            if not resource_name:
+                continue
+            for entry in person.get("emailAddresses") or []:
+                resolved = (entry.get("value") or "").strip().lower()
+                if resolved == email:
+                    person_map[resource_name] = email
+                    break
+    return person_map
+
+
 async def _resolve_person_email(
     client: httpx.AsyncClient,
     headers: dict[str, str],
@@ -361,6 +423,46 @@ async def _resolve_person_email(
     return None
 
 
+async def _enrich_person_map_via_people_api(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    activities: list[dict],
+    person_map: dict[str, str],
+    signup_emails: set[str],
+    email_aliases: set[str],
+    email_canonical: dict[str, str],
+) -> dict[str, str | None]:
+    """Resolve unknown Activity actor personNames to group member emails via People API."""
+    person_cache: dict[str, str | None] = {}
+    unique_persons: set[str] = set()
+    for activity in activities:
+        if not _activity_has_edit(activity):
+            continue
+        actions = activity.get("actions") or []
+        actor = _activity_edit_actor(activity, actions)
+        known = (actor.get("user") or {}).get("knownUser") or {}
+        person_name = known.get("personName")
+        if person_name and person_name not in person_map:
+            unique_persons.add(person_name)
+        for actor_entry in activity.get("actors") or []:
+            entry_known = (actor_entry.get("user") or {}).get("knownUser") or {}
+            entry_person = entry_known.get("personName")
+            if entry_person and entry_person not in person_map:
+                unique_persons.add(entry_person)
+
+    for person_name in unique_persons:
+        email = await _resolve_person_email(
+            client, headers, person_name, person_cache
+        )
+        if email:
+            canonical = _canonicalize_member_email(
+                email, signup_emails, email_aliases, email_canonical
+            )
+            if canonical:
+                person_map[person_name] = canonical
+    return person_cache
+
+
 def _owner_person_map_from_activities(
     activities: list[dict],
     owner_canonical_email: str | None,
@@ -379,6 +481,57 @@ def _owner_person_map_from_activities(
             if person_name:
                 person_map[person_name] = owner_canonical_email
     return person_map
+
+
+def _build_activity_person_map(
+    activities: list[dict],
+    owner_canonical_email: str | None,
+    token_holder_email: str | None,
+    email_canonical: dict[str, str],
+) -> dict[str, str]:
+    """Map Activity API personName IDs to CollabTrack signup emails without People API."""
+    person_map = _owner_person_map_from_activities(activities, owner_canonical_email)
+    if not token_holder_email:
+        return person_map
+    holder = email_canonical.get(
+        token_holder_email.lower(), token_holder_email.lower()
+    )
+    for activity in activities:
+        if not _activity_has_edit(activity):
+            continue
+        actions = activity.get("actions") or []
+        actor = _activity_edit_actor(activity, actions)
+        known = (actor.get("user") or {}).get("knownUser") or {}
+        if known.get("isCurrentUser"):
+            person_name = known.get("personName")
+            if person_name:
+                person_map[person_name] = holder
+        for actor_entry in activity.get("actors") or []:
+            entry_known = (actor_entry.get("user") or {}).get("knownUser") or {}
+            if entry_known.get("isCurrentUser"):
+                person_name = entry_known.get("personName")
+                if person_name:
+                    person_map[person_name] = holder
+    return person_map
+
+
+async def _resolve_activity_actor_email(
+    *,
+    actor: dict,
+    token_holder_email: str | None,
+    person_to_canonical: dict[str, str],
+) -> tuple[str | None, str | None]:
+    user = actor.get("user") or {}
+    if user.get("unknownUser"):
+        return None, "anonymous"
+    known = user.get("knownUser")
+    if known:
+        if known.get("isCurrentUser") and token_holder_email:
+            return token_holder_email.lower(), "me"
+        person_name = known.get("personName")
+        if person_name and person_name in person_to_canonical:
+            return person_to_canonical[person_name], "activity_person_map"
+    return None, None
 
 
 def _activity_timestamp(activity: dict, action: dict | None = None) -> str | None:
@@ -423,35 +576,6 @@ def _activity_edit_actor(activity: dict, actions: list[dict]) -> dict:
     return {}
 
 
-async def _resolve_activity_actor_email(
-    *,
-    client: httpx.AsyncClient,
-    headers: dict[str, str],
-    actor: dict,
-    token_holder_email: str | None,
-    name_to_email: dict[str, str],
-    person_cache: dict[str, str | None],
-    person_to_canonical: dict[str, str],
-) -> tuple[str | None, str | None]:
-    user = actor.get("user") or {}
-    if user.get("unknownUser"):
-        return None, "anonymous"
-    known = user.get("knownUser")
-    if known:
-        if known.get("isCurrentUser") and token_holder_email:
-            return token_holder_email.lower(), "me"
-        person_name = known.get("personName")
-        if person_name and person_name in person_to_canonical:
-            return person_to_canonical[person_name], "owner_person_map"
-        if person_name:
-            email = await _resolve_person_email(
-                client, headers, person_name, person_cache
-            )
-            if email:
-                return email, "activity_person"
-    return None, None
-
-
 async def _sync_drive_activity(
     *,
     client: httpx.AsyncClient,
@@ -463,11 +587,10 @@ async def _sync_drive_activity(
     author_lookup: dict[str, str],
     owner_canonical_email: str | None,
     token_holder_email: str | None,
+    people_lookup_scope_granted: bool = False,
 ) -> tuple[GoogleSyncResult, int | None, str | None, dict | None, list[dict], int]:
     """Query Drive Activity API v2 for EDIT actions only (one count per activity)."""
     result = GoogleSyncResult()
-    lookup = author_lookup
-    person_cache: dict[str, str | None] = {}
     raw_pages: list[dict] = []
     status_code: int | None = None
     error_message: str | None = None
@@ -503,29 +626,27 @@ async def _sync_drive_activity(
         if not page_token:
             break
 
-    person_to_canonical = _owner_person_map_from_activities(
-        all_activities, owner_canonical_email
+    person_to_canonical = _build_activity_person_map(
+        all_activities,
+        owner_canonical_email,
+        token_holder_email,
+        email_canonical,
     )
-    unique_actor_persons: set[str] = set()
-    for activity in all_activities:
-        if not _activity_has_edit(activity):
-            continue
-        actor = _activity_edit_actor(activity, activity.get("actions") or [])
-        known = (actor.get("user") or {}).get("knownUser") or {}
-        person_name = known.get("personName")
-        if person_name and person_name not in person_to_canonical:
-            unique_actor_persons.add(person_name)
-
-    for person_name in unique_actor_persons:
-        email = await _resolve_person_email(
-            client, headers, person_name, person_cache
+    people_lookup_cache: dict[str, str | None] = {}
+    if people_lookup_scope_granted:
+        directory_person_map = await _build_directory_person_map_from_members(
+            client, headers, signup_emails
         )
-        if email:
-            canonical = _canonicalize_member_email(
-                email, signup_emails, email_aliases, email_canonical
-            )
-            if canonical:
-                person_to_canonical[person_name] = canonical
+        person_to_canonical.update(directory_person_map)
+        people_lookup_cache = await _enrich_person_map_via_people_api(
+            client,
+            headers,
+            all_activities,
+            person_to_canonical,
+            signup_emails,
+            email_aliases,
+            email_canonical,
+        )
 
     # #region agent log
     _debug_log(
@@ -535,9 +656,10 @@ async def _sync_drive_activity(
         {
             "file_id": file_id,
             "owner_canonical_email": owner_canonical_email,
+            "people_lookup_scope_granted": people_lookup_scope_granted,
             "person_map_size": len(person_to_canonical),
             "person_to_canonical": person_to_canonical,
-            "unique_actor_persons": len(unique_actor_persons),
+            "people_lookup_results": people_lookup_cache,
         },
     )
     # #endregion
@@ -550,12 +672,8 @@ async def _sync_drive_activity(
         edit_count += 1
         actor = _activity_edit_actor(activity, actions)
         resolved_email, match_method = await _resolve_activity_actor_email(
-            client=client,
-            headers=headers,
             actor=actor,
             token_holder_email=token_holder_email,
-            name_to_email=lookup,
-            person_cache=person_cache,
             person_to_canonical=person_to_canonical,
         )
         storage_email = _canonicalize_member_email(
@@ -630,6 +748,9 @@ async def sync_google_doc(
         status.activity_scope_granted = await _token_has_activity_scope(
             client, access_token
         )
+        status.people_lookup_scope_granted = await _token_has_people_lookup_scope(
+            client, access_token
+        )
         permission_map = await _fetch_permission_name_map(client, file_id, headers)
         author_lookup = _build_author_lookup(signup_emails, name_to_email, permission_map)
         email_aliases = _extend_email_aliases_from_permissions(
@@ -644,6 +765,7 @@ async def sync_google_doc(
                 "file_id": file_id,
                 "token_holder_email": token_holder_email,
                 "activity_scope_granted": status.activity_scope_granted,
+                "people_lookup_scope_granted": status.people_lookup_scope_granted,
                 "permission_map_size": len(permission_map),
                 "author_lookup_size": len(author_lookup),
                 "email_alias_count": len(email_aliases),
@@ -703,6 +825,7 @@ async def sync_google_doc(
             author_lookup=author_lookup,
             owner_canonical_email=owner_canonical_email,
             token_holder_email=token_holder_email,
+            people_lookup_scope_granted=status.people_lookup_scope_granted,
         )
         status.activity_status = activity_status
         status.activity_edit_count = activity_edit_count

@@ -48,7 +48,8 @@ _GOOGLE_SCOPES = (
     "https://www.googleapis.com/auth/drive.readonly "
     "https://www.googleapis.com/auth/documents.readonly "
     "https://www.googleapis.com/auth/drive.activity.readonly "
-    "https://www.googleapis.com/auth/people.readonly"
+    "https://www.googleapis.com/auth/contacts.readonly "
+    "https://www.googleapis.com/auth/directory.readonly"
 )
 
 _GITHUB_REPO_RE = re.compile(
