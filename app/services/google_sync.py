@@ -1,17 +1,125 @@
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 import httpx
 
 from app.schemas.participation import GoogleDocsMetrics
 
 _DRIVE_API = "https://www.googleapis.com/drive/v3"
+_ACTIVITY_API = "https://driveactivity.googleapis.com/v2/activity:query"
+_DEBUG_LOG = "/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-addfa8.log"
+_DEBUG_SESSION = "addfa8"
+
+
+def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    # #region agent log
+    try:
+        Path(_DEBUG_LOG).parent.mkdir(parents=True, exist_ok=True)
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as log_file:
+            log_file.write(
+                json.dumps(
+                    {
+                        "sessionId": _DEBUG_SESSION,
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                        "runId": "google-debug",
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
+
+
+def _parse_google_api_error(resp: httpx.Response) -> dict[str, str | int | None]:
+    """Extract structured error fields from a Google API error response."""
+    result: dict[str, str | int | None] = {
+        "http_status": resp.status_code,
+        "message": resp.text or f"HTTP {resp.status_code}",
+        "reason": None,
+        "error_status": None,
+    }
+    try:
+        payload = resp.json()
+        error = payload.get("error") or {}
+        result["message"] = error.get("message") or result["message"]
+        result["error_status"] = error.get("status")
+        errors = error.get("errors") or []
+        if errors:
+            result["reason"] = errors[0].get("reason")
+    except ValueError:
+        pass
+    return result
+
+
+def _classify_drive_sync_failure(error: dict[str, str | int | None]) -> str:
+    reason = str(error.get("reason") or "")
+    message = str(error.get("message") or "").lower()
+    if reason == "accessNotConfigured" or "has not been used in project" in message:
+        return "drive_api_disabled"
+    if "drive activity" in message or "driveactivity" in message:
+        if "has not been used" in message or "disabled" in message:
+            return "drive_api_disabled"
+    if reason in {"insufficientPermissions", "forbidden"} or "insufficient" in message:
+        return "insufficient_scope_or_access"
+    return "unknown"
+
+
+@dataclass
+class GoogleDocSyncStatus:
+    file_id: str
+    revisions_status: int | None = None
+    comments_status: int | None = None
+    activity_status: int | None = None
+    revision_count: int = 0
+    comment_count: int = 0
+    activity_edit_count: int = 0
+    activity_comment_count: int = 0
+    matched_emails: list[str] = field(default_factory=list)
+    error: str | None = None
+    failure_kind: str | None = None
+    metadata_status: int | None = None
+    activity_source: str | None = None  # activity | revisions | none
+    activity_scope_granted: bool = False
+
+
+@dataclass
+class GoogleDocEvent:
+    type: str
+    file_id: str
+    source_id: str | None
+    author_email: str | None
+    author_name: str | None
+    matched_email: str | None
+    match_method: str | None
+    timestamp: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type,
+            "file_id": self.file_id,
+            "source_id": self.source_id,
+            "author_email": self.author_email,
+            "author_name": self.author_name,
+            "matched_email": self.matched_email,
+            "match_method": self.match_method,
+            "timestamp": self.timestamp,
+        }
 
 
 @dataclass
 class GoogleSyncResult:
     by_email: dict[str, GoogleDocsMetrics] = field(default_factory=dict)
+    events_by_email: dict[str, list[GoogleDocEvent]] = field(default_factory=dict)
 
     def get_or_create(self, email: str) -> GoogleDocsMetrics:
         key = email.lower()
@@ -19,43 +127,777 @@ class GoogleSyncResult:
             self.by_email[key] = GoogleDocsMetrics()
         return self.by_email[key]
 
+    def record_event(self, matched_email: str, event: GoogleDocEvent) -> None:
+        key = matched_email.lower()
+        self.events_by_email.setdefault(key, []).append(event)
+
+
+def _normalize_person_name(name: str) -> str:
+    return " ".join(name.strip().lower().split())
+
+
+def _build_author_lookup(
+    member_emails: set[str],
+    name_to_email: dict[str, str] | None,
+    permission_map: dict[str, str],
+) -> dict[str, str]:
+    lookup: dict[str, str] = dict(permission_map)
+    if name_to_email:
+        lookup.update(name_to_email)
+    for email in member_emails:
+        local = email.split("@", 1)[0].lower()
+        lookup[local] = email
+        lookup[_normalize_person_name(local)] = email
+    return lookup
+
+
+def _resolve_author_email(
+    author: dict,
+    token_holder_email: str | None,
+    name_to_email: dict[str, str] | None = None,
+    member_emails: set[str] | None = None,
+) -> tuple[str | None, str | None]:
+    """Return (resolved email, match_method) from a Drive User object."""
+    email = (author.get("emailAddress") or "").strip().lower()
+    if email:
+        return email, "email"
+    if author.get("me") and token_holder_email:
+        return token_holder_email.lower(), "me"
+    display_name = author.get("displayName")
+    if display_name:
+        normalized = _normalize_person_name(display_name)
+        local_key = display_name.strip().lower()
+        if name_to_email:
+            matched = name_to_email.get(normalized) or name_to_email.get(local_key)
+            if matched:
+                return matched.lower(), "display_name"
+        if member_emails:
+            for member_email in member_emails:
+                if member_email.split("@", 1)[0] == local_key:
+                    return member_email, "member_local_part"
+    return None, None
+
+
+def _attribute_to_member(
+    *,
+    result: GoogleSyncResult,
+    normalized: set[str],
+    author: dict,
+    token_holder_email: str | None,
+    name_to_email: dict[str, str] | None,
+    file_id: str,
+    source_id: str | None,
+    event_type: str,
+    timestamp: str | None,
+    metric_field: str,
+) -> str | None:
+    resolved_email, match_method = _resolve_author_email(
+        author,
+        token_holder_email,
+        name_to_email,
+        member_emails=normalized,
+    )
+    author_name = author.get("displayName")
+    matched_email = resolved_email if resolved_email in normalized else None
+    if matched_email:
+        metrics = result.get_or_create(matched_email)
+        current = getattr(metrics, metric_field)
+        setattr(metrics, metric_field, current + 1)
+        result.record_event(
+            matched_email,
+            GoogleDocEvent(
+                type=event_type,
+                file_id=file_id,
+                source_id=source_id,
+                author_email=resolved_email,
+                author_name=author_name,
+                matched_email=matched_email,
+                match_method=match_method,
+                timestamp=timestamp,
+            ),
+        )
+    return resolved_email
+
+
+def _merge_name_maps(
+    *maps: dict[str, str] | None,
+) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for name_map in maps:
+        if name_map:
+            merged.update(name_map)
+    return merged
+
+
+async def _fetch_permission_name_map(
+    client: httpx.AsyncClient,
+    file_id: str,
+    headers: dict[str, str],
+) -> dict[str, str]:
+    """Build lookup keys (display name, email local-part) -> email from file ACL."""
+    name_to_email: dict[str, str] = {}
+    page_token: str | None = None
+    while True:
+        params: dict = {
+            "fields": "permissions(emailAddress,displayName),nextPageToken",
+            "pageSize": 100,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        resp = await client.get(
+            f"{_DRIVE_API}/files/{file_id}/permissions",
+            headers=headers,
+            params=params,
+        )
+        if resp.status_code != 200:
+            break
+        data = resp.json()
+        for perm in data.get("permissions") or []:
+            email = (perm.get("emailAddress") or "").strip().lower()
+            display = perm.get("displayName")
+            if not email:
+                continue
+            if display:
+                name_to_email[_normalize_person_name(display)] = email
+                local = email.split("@", 1)[0]
+                name_to_email[local.lower()] = email
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return name_to_email
+
+
+async def _token_has_activity_scope(
+    client: httpx.AsyncClient,
+    access_token: str,
+) -> bool:
+    resp = await client.get(
+        "https://www.googleapis.com/oauth2/v1/tokeninfo",
+        params={"access_token": access_token},
+    )
+    if resp.status_code != 200:
+        return False
+    scope = str(resp.json().get("scope") or "")
+    return "drive.activity.readonly" in scope
+
+
+async def _resolve_person_email(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    person_name: str,
+    cache: dict[str, str | None],
+) -> str | None:
+    if person_name in cache:
+        return cache[person_name]
+    resp = await client.get(
+        f"https://people.googleapis.com/v1/{person_name}",
+        headers=headers,
+        params={"personFields": "emailAddresses,names"},
+    )
+    if resp.status_code != 200:
+        cache[person_name] = None
+        return None
+    data = resp.json()
+    for entry in data.get("emailAddresses") or []:
+        email = (entry.get("value") or "").strip().lower()
+        if email:
+            cache[person_name] = email
+            return email
+    cache[person_name] = None
+    return None
+
+
+def _activity_timestamp(activity: dict, action: dict | None = None) -> str | None:
+    if action:
+        if action.get("timestamp"):
+            return str(action["timestamp"])
+        time_range = action.get("timeRange") or {}
+        end = time_range.get("endTime") or time_range.get("startTime")
+        if end and end.get("seconds"):
+            return str(end["seconds"])
+    if activity.get("timestamp"):
+        return str(activity["timestamp"])
+    time_range = activity.get("timeRange") or {}
+    end = time_range.get("endTime") or time_range.get("startTime")
+    if end and end.get("seconds"):
+        return str(end["seconds"])
+    return None
+
+
+def _is_edit_detail(detail: dict) -> bool:
+    """True only for edit actions; ignore create, rename, move, share, etc."""
+    return detail.get("edit") is not None
+
+
+def _activity_has_edit(activity: dict) -> bool:
+    actions = activity.get("actions") or []
+    if actions:
+        return any(_is_edit_detail(action.get("detail") or {}) for action in actions)
+    primary = activity.get("primaryActionDetail") or {}
+    return _is_edit_detail(primary)
+
+
+def _activity_edit_actor(activity: dict, actions: list[dict]) -> dict:
+    """Prefer activity-level actors[0]; fall back to per-action actor."""
+    actors = activity.get("actors") or []
+    if actors:
+        return actors[0]
+    for action in actions:
+        actor = action.get("actor")
+        if actor:
+            return actor
+    return {}
+
+
+async def _resolve_activity_actor_email(
+    *,
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    actor: dict,
+    token_holder_email: str | None,
+    name_to_email: dict[str, str],
+    person_cache: dict[str, str | None],
+) -> tuple[str | None, str | None]:
+    user = actor.get("user") or {}
+    if user.get("unknownUser"):
+        return None, "anonymous"
+    known = user.get("knownUser")
+    if known:
+        if known.get("isCurrentUser") and token_holder_email:
+            return token_holder_email.lower(), "me"
+        person_name = known.get("personName")
+        if person_name:
+            email = await _resolve_person_email(
+                client, headers, person_name, person_cache
+            )
+            if email:
+                return email, "activity_person"
+    return None, None
+
+
+async def _sync_drive_activity(
+    *,
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    file_id: str,
+    emails: set[str],
+    token_holder_email: str | None,
+    name_to_email: dict[str, str] | None,
+) -> tuple[GoogleSyncResult, int | None, str | None, dict | None, list[dict], int]:
+    """Query Drive Activity API v2 for EDIT actions only (one count per activity)."""
+    result = GoogleSyncResult()
+    normalized = {email.lower() for email in emails}
+    lookup = name_to_email or {}
+    person_cache: dict[str, str | None] = {}
+    raw_pages: list[dict] = []
+    status_code: int | None = None
+    error_message: str | None = None
+    error_details: dict | None = None
+    edit_count = 0
+    unattributed_edits = 0
+    page_token: str | None = None
+
+    while True:
+        body: dict = {
+            "itemName": f"items/{file_id}",
+            "filter": "detail.action_detail_case:EDIT",
+            "pageSize": 100,
+            "consolidationStrategy": {"none": {}},
+        }
+        if page_token:
+            body["pageToken"] = page_token
+        resp = await client.post(_ACTIVITY_API, headers=headers, json=body)
+        status_code = resp.status_code
+        if resp.status_code != 200:
+            error_details = _parse_google_api_error(resp)
+            error_message = str(error_details.get("message"))
+            try:
+                raw_pages.append(resp.json())
+            except ValueError:
+                raw_pages.append({"raw_text": resp.text[:2000]})
+            break
+        data = resp.json()
+        raw_pages.append(data)
+        for activity in data.get("activities") or []:
+            if not _activity_has_edit(activity):
+                continue
+
+            actions = activity.get("actions") or []
+            # One activity = one edit (timestamp = single edit, timeRange = merged edits).
+            edit_count += 1
+            actor = _activity_edit_actor(activity, actions)
+            resolved_email, match_method = await _resolve_activity_actor_email(
+                client=client,
+                headers=headers,
+                actor=actor,
+                token_holder_email=token_holder_email,
+                name_to_email=lookup,
+                person_cache=person_cache,
+            )
+            matched_email = resolved_email if resolved_email in normalized else None
+            if not matched_email and resolved_email:
+                local = resolved_email.split("@", 1)[0]
+                for member_email in normalized:
+                    if member_email.split("@", 1)[0] == local:
+                        matched_email = member_email
+                        match_method = "activity_email_local"
+                        break
+            if not matched_email:
+                unattributed_edits += 1
+            # Timestamp from action when present, else activity (handles both fields).
+            action_for_time = actions[0] if actions else None
+            timestamp = _activity_timestamp(activity, action_for_time)
+            source_id = f"activity:{timestamp}:{edit_count}:edit"
+            if matched_email:
+                metrics = result.get_or_create(matched_email)
+                metrics.edits += 1
+                result.record_event(
+                    matched_email,
+                    GoogleDocEvent(
+                        type="edit",
+                        file_id=file_id,
+                        source_id=source_id,
+                        author_email=resolved_email,
+                        author_name=None,
+                        matched_email=matched_email,
+                        match_method=match_method or "activity",
+                        timestamp=timestamp,
+                    ),
+                )
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+
+    # #region agent log
+    _debug_log(
+        "H1-H4",
+        "google_sync.py:_sync_drive_activity:summary",
+        "Activity edit attribution summary",
+        {
+            "file_id": file_id,
+            "edit_count": edit_count,
+            "unattributed_edits": unattributed_edits,
+            "attributed_emails": list(result.by_email.keys()),
+            "per_email_edits": {
+                email: metrics.edits for email, metrics in result.by_email.items()
+            },
+        },
+    )
+    # #endregion
+
+    return (
+        result,
+        status_code,
+        error_message,
+        error_details,
+        raw_pages,
+        edit_count,
+    )
+
 
 async def sync_google_doc(
     *,
     access_token: str,
     file_id: str,
     emails: set[str],
-) -> GoogleSyncResult:
+    token_holder_email: str | None = None,
+    name_to_email: dict[str, str] | None = None,
+) -> tuple[GoogleSyncResult, GoogleDocSyncStatus]:
     headers = {"Authorization": f"Bearer {access_token}"}
-    result = GoogleSyncResult()
+    status = GoogleDocSyncStatus(file_id=file_id)
     normalized = {email.lower() for email in emails}
+    revision_author_emails: set[str] = set()
+    comment_author_emails: set[str] = set()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        revisions = await _paginate(
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        status.activity_scope_granted = await _token_has_activity_scope(
+            client, access_token
+        )
+        permission_map = await _fetch_permission_name_map(client, file_id, headers)
+        author_lookup = _build_author_lookup(normalized, name_to_email, permission_map)
+        # #region agent log
+        _debug_log(
+            "H11",
+            "google_sync.py:sync_google_doc:author_lookup",
+            "Author lookup keys for member matching",
+            {
+                "file_id": file_id,
+                "token_holder_email": token_holder_email,
+                "activity_scope_granted": status.activity_scope_granted,
+                "permission_map_size": len(permission_map),
+                "author_lookup_size": len(author_lookup),
+                "sample_keys": sorted(author_lookup.keys())[:12],
+            },
+        )
+        # #endregion
+
+        metadata_resp = await client.get(
+            f"{_DRIVE_API}/files/{file_id}",
+            headers=headers,
+            params={"fields": "id,name"},
+        )
+        status.metadata_status = metadata_resp.status_code
+        metadata_error = (
+            _parse_google_api_error(metadata_resp)
+            if metadata_resp.status_code != 200
+            else None
+        )
+        # #region agent log
+        _debug_log(
+            "H4",
+            "google_sync.py:sync_google_doc:metadata_probe",
+            "Drive file metadata probe",
+            {
+                "file_id": file_id,
+                "metadata_status": metadata_resp.status_code,
+                "metadata_error": metadata_error,
+            },
+        )
+        # #endregion
+
+        (
+            activity_result,
+            activity_status,
+            activity_error,
+            activity_details,
+            activity_raw_pages,
+            activity_edit_count,
+        ) = await _sync_drive_activity(
+            client=client,
+            headers=headers,
+            file_id=file_id,
+            emails=emails,
+            token_holder_email=token_holder_email,
+            name_to_email=author_lookup,
+        )
+        status.activity_status = activity_status
+        status.activity_edit_count = activity_edit_count
+        activity_edit_match_score = sum(
+            m.edits for m in activity_result.by_email.values()
+        )
+        # #region agent log
+        _debug_log(
+            "H10",
+            "google_sync.py:sync_google_doc:drive_activity_raw",
+            "Drive Activity API raw response pages",
+            {
+                "file_id": file_id,
+                "token_holder_email": token_holder_email,
+                "activity_status": activity_status,
+                "page_count": len(activity_raw_pages),
+                "raw_pages": activity_raw_pages,
+                "activity_edit_count": activity_edit_count,
+                "activity_matched_emails": list(activity_result.by_email.keys()),
+                "activity_edit_match_score": activity_edit_match_score,
+                "activity_error": activity_error,
+            },
+        )
+        # #endregion
+
+        revisions_result = GoogleSyncResult()
+        revisions, revisions_status, revisions_error, revisions_details, revisions_raw_pages = await _paginate(
             client,
             f"{_DRIVE_API}/files/{file_id}/revisions",
             headers,
-            params={"pageSize": 100, "fields": "revisions(id,lastModifyingUser)"},
+            params={
+                "pageSize": 100,
+                "fields": (
+                    "revisions(id,modifiedTime,lastModifyingUser"
+                    "(emailAddress,displayName,me)),nextPageToken"
+                ),
+            },
+            capture_raw_pages=True,
         )
+        # #region agent log
+        _debug_log(
+            "H8",
+            "google_sync.py:sync_google_doc:drive_revisions_raw",
+            "Drive revisions API raw response pages",
+            {
+                "file_id": file_id,
+                "token_holder_email": token_holder_email,
+                "revisions_status": revisions_status,
+                "page_count": len(revisions_raw_pages),
+                "raw_pages": revisions_raw_pages,
+                "parsed_revision_count": len(revisions),
+            },
+        )
+        # #endregion
+        status.revisions_status = revisions_status
+        revision_author_debug: list[dict] = []
         for revision in revisions:
             user = revision.get("lastModifyingUser") or {}
-            email = (user.get("emailAddress") or "").lower()
-            if email in normalized:
-                result.get_or_create(email).edits += 1
+            resolved = _attribute_to_member(
+                result=revisions_result,
+                normalized=normalized,
+                author=user,
+                token_holder_email=token_holder_email,
+                name_to_email=author_lookup,
+                file_id=file_id,
+                source_id=revision.get("id"),
+                event_type="edit",
+                timestamp=revision.get("modifiedTime"),
+                metric_field="edits",
+            )
+            revision_author_debug.append(
+                {
+                    "revision_id": revision.get("id"),
+                    "author_keys": sorted(user.keys()),
+                    "has_email": bool(user.get("emailAddress")),
+                    "me": user.get("me"),
+                    "display_name": user.get("displayName"),
+                    "resolved_email": resolved,
+                }
+            )
+            if resolved:
+                revision_author_emails.add(resolved)
+        # #region agent log
+        _debug_log(
+            "H7",
+            "google_sync.py:sync_google_doc:revision_authors",
+            "Revision author resolution details",
+            {"file_id": file_id, "revisions": revision_author_debug},
+        )
+        # #endregion
 
-        comments = await _paginate_comments(client, file_id, headers)
+        comments_result = GoogleSyncResult()
+        comments, comments_status, comments_error, comments_details, comments_raw_pages = await _paginate_comments(
+            client, file_id, headers, capture_raw_pages=True
+        )
+        # #region agent log
+        _debug_log(
+            "H8",
+            "google_sync.py:sync_google_doc:drive_comments_raw",
+            "Drive comments API raw response pages",
+            {
+                "file_id": file_id,
+                "token_holder_email": token_holder_email,
+                "comments_status": comments_status,
+                "page_count": len(comments_raw_pages),
+                "raw_pages": comments_raw_pages,
+                "parsed_comment_count": len(comments),
+            },
+        )
+        # #endregion
+        status.comments_status = comments_status
+        comment_author_debug: list[dict] = []
+        reply_count = 0
         for comment in comments:
             author = comment.get("author") or {}
-            email = (author.get("emailAddress") or "").lower()
-            if email in normalized:
-                result.get_or_create(email).comments += 1
+            resolved = _attribute_to_member(
+                result=comments_result,
+                normalized=normalized,
+                author=author,
+                token_holder_email=token_holder_email,
+                name_to_email=author_lookup,
+                file_id=file_id,
+                source_id=comment.get("id"),
+                event_type="comment",
+                timestamp=comment.get("createdTime"),
+                metric_field="comments",
+            )
+            comment_author_debug.append(
+                {
+                    "comment_id": comment.get("id"),
+                    "author_keys": sorted(author.keys()),
+                    "has_email": bool(author.get("emailAddress")),
+                    "me": author.get("me"),
+                    "display_name": author.get("displayName"),
+                    "resolved_email": resolved,
+                }
+            )
+            if resolved:
+                comment_author_emails.add(resolved)
             for reply in comment.get("replies") or []:
+                reply_count += 1
                 reply_author = reply.get("author") or {}
-                reply_email = (reply_author.get("emailAddress") or "").lower()
-                if reply_email in normalized:
-                    result.get_or_create(reply_email).comments += 1
+                reply_resolved = _attribute_to_member(
+                    result=comments_result,
+                    normalized=normalized,
+                    author=reply_author,
+                    token_holder_email=token_holder_email,
+                    name_to_email=author_lookup,
+                    file_id=file_id,
+                    source_id=reply.get("id"),
+                    event_type="comment_reply",
+                    timestamp=reply.get("createdTime"),
+                    metric_field="comments",
+                )
+                if reply_resolved:
+                    comment_author_emails.add(reply_resolved)
+        # #region agent log
+        _debug_log(
+            "H5-H6",
+            "google_sync.py:sync_google_doc:comment_attribution",
+            "Drive comments + replies attribution",
+            {
+                "file_id": file_id,
+                "top_level_comments": len(comments),
+                "nested_replies": reply_count,
+                "total_comment_metric": sum(
+                    m.comments for m in comments_result.by_email.values()
+                ),
+                "per_email_comments": {
+                    email: metrics.comments
+                    for email, metrics in comments_result.by_email.items()
+                },
+                "comment_authors": comment_author_debug,
+            },
+        )
+        # #endregion
 
-    return result
+        docs_api_resp = await client.get(
+            f"https://docs.googleapis.com/v1/documents/{file_id}",
+            headers=headers,
+            params={"fields": "documentId,title,revisionId"},
+        )
+        docs_api_body: dict | str
+        try:
+            docs_api_body = docs_api_resp.json()
+        except ValueError:
+            docs_api_body = docs_api_resp.text[:2000]
+        # #region agent log
+        _debug_log(
+            "H9",
+            "google_sync.py:sync_google_doc:docs_api_raw",
+            "Google Docs API raw response",
+            {
+                "file_id": file_id,
+                "token_holder_email": token_holder_email,
+                "docs_status": docs_api_resp.status_code,
+                "docs_body": docs_api_body,
+            },
+        )
+        # #endregion
+
+        metadata_full_resp = await client.get(
+            f"{_DRIVE_API}/files/{file_id}",
+            headers=headers,
+            params={
+                "fields": (
+                    "id,name,mimeType,modifiedTime,createdTime,owners,"
+                    "lastModifyingUser,version,headRevisionId,capabilities"
+                ),
+            },
+        )
+        metadata_full_body: dict | str
+        try:
+            metadata_full_body = metadata_full_resp.json()
+        except ValueError:
+            metadata_full_body = metadata_full_resp.text[:2000]
+        # #region agent log
+        _debug_log(
+            "H8",
+            "google_sync.py:sync_google_doc:drive_metadata_raw",
+            "Drive files.get raw response",
+            {
+                "file_id": file_id,
+                "token_holder_email": token_holder_email,
+                "metadata_status": metadata_full_resp.status_code,
+                "metadata_body": metadata_full_body,
+            },
+        )
+        # #endregion
+
+        revision_edit_match_score = sum(
+            m.edits for m in revisions_result.by_email.values()
+        )
+        result = GoogleSyncResult()
+        use_activity_edits = (
+            activity_status == 200
+            and (
+                activity_edit_match_score > 0
+                or activity_edit_count > 0
+                or revision_edit_match_score == 0
+            )
+        )
+        if use_activity_edits:
+            merge_google_results(result, activity_result)
+            status.activity_source = "activity"
+        else:
+            merge_google_results(result, revisions_result)
+            status.activity_source = "revisions"
+        # Comments always from Drive API v3 comments endpoint (never Activity API).
+        merge_google_results(result, comments_result)
+
+        status.revision_count = len(revisions)
+        status.comment_count = len(comments) + reply_count
+        status.matched_emails = list(result.by_email.keys())
+
+        if activity_status != 200 and activity_details:
+            activity_failure = _classify_drive_sync_failure(activity_details)
+            if activity_failure == "drive_api_disabled":
+                status.failure_kind = activity_failure
+                status.error = activity_error
+            elif activity_failure == "insufficient_scope_or_access" and not status.failure_kind:
+                status.failure_kind = activity_failure
+                status.error = activity_error
+
+        if revisions_status != 200 and comments_status != 200 and activity_status != 200:
+            primary_error = revisions_details or comments_details or {}
+            status.error = revisions_error or comments_error or (
+                f"Drive API returned {revisions_status} for revisions and "
+                f"{comments_status} for comments."
+            )
+            status.failure_kind = _classify_drive_sync_failure(primary_error)
+        elif revisions_status != 200:
+            status.error = revisions_error or (
+                f"Drive API returned {revisions_status} for revisions."
+            )
+            status.failure_kind = _classify_drive_sync_failure(
+                revisions_details or {}
+            )
+
+        # #region agent log
+        _debug_log(
+            "H1",
+            "google_sync.py:sync_google_doc:api_errors",
+            "Drive API error classification",
+            {
+                "file_id": file_id,
+                "metadata_status": status.metadata_status,
+                "revisions_status": revisions_status,
+                "comments_status": comments_status,
+                "activity_status": activity_status,
+                "activity_source": status.activity_source,
+                "activity_edit_count": activity_edit_count,
+                "activity_edit_match_score": activity_edit_match_score,
+                "revision_edit_match_score": revision_edit_match_score,
+                "use_activity_edits": use_activity_edits,
+                "revisions_details": revisions_details,
+                "comments_details": comments_details,
+                "failure_kind": status.failure_kind,
+            },
+        )
+        # #endregion
+
+        # #region agent log
+        _debug_log(
+            "G4",
+            "google_sync.py:sync_google_doc:complete",
+            "Google doc sync finished",
+            {
+                "file_id": file_id,
+                "revisions_status": revisions_status,
+                "comments_status": comments_status,
+                "activity_status": activity_status,
+                "activity_source": status.activity_source,
+                "revision_count": len(revisions),
+                "comment_count": status.comment_count,
+                "activity_edit_count": activity_edit_count,
+                "activity_edit_match_score": activity_edit_match_score,
+                "revision_edit_match_score": revision_edit_match_score,
+                "use_activity_edits": use_activity_edits,
+                "revision_author_emails": sorted(revision_author_emails),
+                "comment_author_emails": sorted(comment_author_emails),
+                "matched_emails": list(result.by_email.keys()),
+                "error": status.error,
+                "failure_kind": status.failure_kind,
+            },
+        )
+        # #endregion
+
+    return result, status
 
 
 def merge_google_results(
@@ -65,6 +907,8 @@ def merge_google_results(
         existing = target.get_or_create(email)
         existing.edits += metrics.edits
         existing.comments += metrics.comments
+    for email, events in source.events_by_email.items():
+        target.events_by_email.setdefault(email, []).extend(events)
     return target
 
 
@@ -86,35 +930,72 @@ async def _paginate(
     url: str,
     headers: dict[str, str],
     params: dict | None = None,
-) -> list[dict]:
+    capture_raw_pages: bool = False,
+) -> tuple[
+    list[dict],
+    int | None,
+    str | None,
+    dict[str, str | int | None] | None,
+    list[dict],
+]:
     items: list[dict] = []
+    raw_pages: list[dict] = []
     page_token: str | None = None
+    status_code: int | None = None
+    error_message: str | None = None
+    error_details: dict[str, str | int | None] | None = None
     while True:
         query = dict(params or {})
         if page_token:
             query["pageToken"] = page_token
         resp = await client.get(url, headers=headers, params=query)
+        status_code = resp.status_code
         if resp.status_code != 200:
+            error_details = _parse_google_api_error(resp)
+            error_message = str(error_details.get("message"))
+            if capture_raw_pages:
+                try:
+                    raw_pages.append(resp.json())
+                except ValueError:
+                    raw_pages.append({"raw_text": resp.text[:2000]})
             break
         data = resp.json()
+        if capture_raw_pages:
+            raw_pages.append(data)
         items.extend(data.get("revisions") or data.get("files") or [])
         page_token = data.get("nextPageToken")
         if not page_token:
             break
-    return items
+    return items, status_code, error_message, error_details, raw_pages
 
 
 async def _paginate_comments(
     client: httpx.AsyncClient,
     file_id: str,
     headers: dict[str, str],
-) -> list[dict]:
+    capture_raw_pages: bool = False,
+) -> tuple[
+    list[dict],
+    int | None,
+    str | None,
+    dict[str, str | int | None] | None,
+    list[dict],
+]:
     items: list[dict] = []
+    raw_pages: list[dict] = []
     page_token: str | None = None
+    status_code: int | None = None
+    error_message: str | None = None
+    error_details: dict[str, str | int | None] | None = None
     while True:
         params: dict = {
-            "fields": "comments(author,replies(author)),nextPageToken",
+            "fields": (
+                "comments(id,createdTime,author(emailAddress,displayName,me),"
+                "replies(id,createdTime,author(emailAddress,displayName,me))),"
+                "nextPageToken"
+            ),
             "pageSize": 100,
+            "includeDeleted": False,
         }
         if page_token:
             params["pageToken"] = page_token
@@ -123,11 +1004,21 @@ async def _paginate_comments(
             headers=headers,
             params=params,
         )
+        status_code = resp.status_code
         if resp.status_code != 200:
+            error_details = _parse_google_api_error(resp)
+            error_message = str(error_details.get("message"))
+            if capture_raw_pages:
+                try:
+                    raw_pages.append(resp.json())
+                except ValueError:
+                    raw_pages.append({"raw_text": resp.text[:2000]})
             break
         data = resp.json()
+        if capture_raw_pages:
+            raw_pages.append(data)
         items.extend(data.get("comments") or [])
         page_token = data.get("nextPageToken")
         if not page_token:
             break
-    return items
+    return items, status_code, error_message, error_details, raw_pages

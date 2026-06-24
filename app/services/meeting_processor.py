@@ -168,33 +168,53 @@ async def _resolve_names(
         )
         .options(selectinload(GroupMembership.user))
     )
-    user_id_by_lower_name: dict[str, str] = {}
     user_id_by_email: dict[str, str] = {}
     for membership in memberships.all():
         user = membership.user
         user_id_by_email[user.email.lower()] = user.id
-        if user.name:
-            user_id_by_lower_name[user.name.strip().lower()] = user.id
 
     attendance = attendance or {}
+    attendance_names = set(attendance.keys())
+    transcript_chat_names = display_names - attendance_names
     resolved: dict[str, str] = {}
     unmapped: set[str] = set()
 
-    for display_name in display_names:
+    def _resolve_attendance_name(display_name: str) -> bool:
         if display_name in mapping_by_name:
             resolved[display_name] = mapping_by_name[display_name]
-            continue
+            return True
 
         attendance_row = attendance.get(display_name)
         if attendance_row and attendance_row.email:
             user_id = user_id_by_email.get(attendance_row.email)
             if user_id:
                 resolved[display_name] = user_id
-                continue
+                return True
 
-        user_id = user_id_by_lower_name.get(display_name.strip().lower())
-        if user_id:
-            resolved[display_name] = user_id
+        return False
+
+    for display_name in sorted(display_names):
+        if display_name not in attendance_names:
+            continue
+        if not _resolve_attendance_name(display_name):
+            unmapped.add(display_name)
+
+    for display_name in sorted(transcript_chat_names):
+        if display_name in mapping_by_name:
+            resolved[display_name] = mapping_by_name[display_name]
+            continue
+
+        lower = display_name.strip().lower()
+        alias_source = next(
+            (
+                name
+                for name in attendance_names
+                if name.strip().lower() == lower and name in resolved
+            ),
+            None,
+        )
+        if alias_source is not None:
+            resolved[display_name] = resolved[alias_source]
             continue
 
         unmapped.add(display_name)

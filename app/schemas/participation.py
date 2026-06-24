@@ -19,6 +19,19 @@ class GoogleDocsMetrics(BaseModel):
     comments: int = 0
 
 
+class GoogleDocSyncEvent(BaseModel):
+    """Single Drive revision or comment that contributed to a member's score."""
+
+    type: str  # edit | comment | comment_reply
+    file_id: str
+    source_id: str | None = None
+    author_email: str | None = None
+    author_name: str | None = None
+    matched_email: str | None = None
+    match_method: str | None = None  # email | me
+    timestamp: str | None = None
+
+
 class MemberParticipationOut(BaseModel):
     user_id: str
     name: str | None
@@ -30,6 +43,7 @@ class MemberParticipationOut(BaseModel):
     google_email_matched: bool | None = None
     github: GithubMetrics | None = None
     google_docs: GoogleDocsMetrics | None = None
+    google_docs_events: list[GoogleDocSyncEvent] = Field(default_factory=list)
     meeting_engagement: MeetingEngagementMetrics | None = None
 
 
@@ -43,3 +57,4 @@ class SyncOut(BaseModel):
     group_id: str
     synced_at: datetime
     members_synced: int
+    warnings: list[str] = Field(default_factory=list)

@@ -14,6 +14,9 @@ _GITHUB_API = "https://api.github.com"
 class GithubSyncResult:
     by_login: dict[str, GithubMetrics] = field(default_factory=dict)
     by_email: dict[str, GithubMetrics] = field(default_factory=dict)
+    login_public_emails: dict[str, str | None] = field(default_factory=dict)
+    login_git_emails: dict[str, set[str]] = field(default_factory=dict)
+    commits_fetched: int = 0
 
     def get_or_create_login(self, login: str) -> GithubMetrics:
         if login not in self.by_login:
@@ -30,20 +33,48 @@ class GithubSyncResult:
         return self.get_or_create_login(login)
 
 
+def _list_params(*, since: datetime | None, extra: dict | None = None) -> dict:
+    params = {"per_page": 100, **(extra or {})}
+    if since is not None:
+        params["since"] = since.isoformat().replace("+00:00", "Z")
+    return params
+
+
+async def _add_commit_stats(
+    client: httpx.AsyncClient,
+    *,
+    headers: dict[str, str],
+    owner: str,
+    repo: str,
+    commit: dict,
+    metrics: GithubMetrics,
+) -> None:
+    metrics.total_commits += 1
+    sha = commit.get("sha")
+    if not sha:
+        return
+    detail = await client.get(
+        f"{_GITHUB_API}/repos/{owner}/{repo}/commits/{sha}",
+        headers=headers,
+    )
+    if detail.status_code == 200:
+        stats = detail.json().get("stats") or {}
+        metrics.lines_changed += stats.get("additions", 0) + stats.get("deletions", 0)
+
+
 async def sync_github_repo(
     *,
     access_token: str,
     owner: str,
     repo: str,
-    since: datetime,
     logins: set[str],
+    since: datetime | None = None,
 ) -> GithubSyncResult:
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/vnd.github+json",
     }
     result = GithubSyncResult()
-    since_iso = since.isoformat().replace("+00:00", "Z")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for login in logins:
@@ -52,22 +83,17 @@ async def sync_github_repo(
                 client,
                 f"{_GITHUB_API}/repos/{owner}/{repo}/commits",
                 headers,
-                params={"author": login, "since": since_iso, "per_page": 100},
+                params=_list_params(since=since, extra={"author": login}),
             )
-            metrics.total_commits = len(commits)
             for commit in commits:
-                sha = commit.get("sha")
-                if not sha:
-                    continue
-                detail = await client.get(
-                    f"{_GITHUB_API}/repos/{owner}/{repo}/commits/{sha}",
+                await _add_commit_stats(
+                    client,
                     headers=headers,
+                    owner=owner,
+                    repo=repo,
+                    commit=commit,
+                    metrics=metrics,
                 )
-                if detail.status_code == 200:
-                    stats = detail.json().get("stats") or {}
-                    metrics.lines_changed += stats.get("additions", 0) + stats.get(
-                        "deletions", 0
-                    )
 
         pulls = await _paginate(
             client,
@@ -148,17 +174,16 @@ async def sync_github_repo_by_email(
     access_token: str,
     owner: str,
     repo: str,
-    since: datetime,
     emails: set[str],
+    since: datetime | None = None,
 ) -> GithubSyncResult:
-    """Attribute GitHub activity to members by commit author email."""
+    """Attribute GitHub activity by commit author login and git author email."""
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/vnd.github+json",
     }
     result = GithubSyncResult()
     normalized = {email.lower() for email in emails}
-    since_iso = since.isoformat().replace("+00:00", "Z")
     login_email_cache: dict[str, str | None] = {}
 
     async def resolve_login_email(client: httpx.AsyncClient, login: str) -> str | None:
@@ -169,6 +194,7 @@ async def sync_github_repo_by_email(
         if resp.status_code == 200:
             email = (resp.json().get("email") or "").lower() or None
         login_email_cache[login] = email
+        result.login_public_emails[login] = email
         return email
 
     async def attribute_login(
@@ -176,38 +202,67 @@ async def sync_github_repo_by_email(
     ) -> None:
         if not login:
             return
+        login_metrics = result.get_or_create_login(login)
+        setattr(login_metrics, increment, getattr(login_metrics, increment) + 1)
         email = await resolve_login_email(client, login)
         if email and email in normalized:
-            metrics = result.get_or_create_email(email)
-            setattr(metrics, increment, getattr(metrics, increment) + 1)
+            email_metrics = result.get_or_create_email(email)
+            setattr(email_metrics, increment, getattr(email_metrics, increment) + 1)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         commits = await _paginate(
             client,
             f"{_GITHUB_API}/repos/{owner}/{repo}/commits",
             headers,
-            params={"since": since_iso, "per_page": 100},
+            params=_list_params(since=since),
         )
+        result.commits_fetched += len(commits)
         for commit in commits:
-            commit_data = commit.get("commit") or {}
-            author = commit_data.get("author") or {}
-            email = (author.get("email") or "").lower()
-            if email not in normalized:
-                continue
-            metrics = result.get_or_create_email(email)
-            metrics.total_commits += 1
-            sha = commit.get("sha")
-            if not sha:
-                continue
-            detail = await client.get(
-                f"{_GITHUB_API}/repos/{owner}/{repo}/commits/{sha}",
-                headers=headers,
-            )
-            if detail.status_code == 200:
-                stats = detail.json().get("stats") or {}
-                metrics.lines_changed += stats.get("additions", 0) + stats.get(
-                    "deletions", 0
+            author_login = (commit.get("author") or {}).get("login")
+            git_email = (
+                ((commit.get("commit") or {}).get("author") or {}).get("email") or ""
+            ).lower()
+
+            if author_login:
+                await resolve_login_email(client, author_login)
+                if git_email:
+                    result.login_git_emails.setdefault(author_login, set()).add(
+                        git_email
+                    )
+                await _add_commit_stats(
+                    client,
+                    headers=headers,
+                    owner=owner,
+                    repo=repo,
+                    commit=commit,
+                    metrics=result.get_or_create_login(author_login),
                 )
+
+            if git_email in normalized:
+                await _add_commit_stats(
+                    client,
+                    headers=headers,
+                    owner=owner,
+                    repo=repo,
+                    commit=commit,
+                    metrics=result.get_or_create_email(git_email),
+                )
+
+            if author_login:
+                public_email = login_email_cache.get(author_login)
+                if (
+                    public_email
+                    and public_email in normalized
+                    and public_email != git_email
+                ):
+                    await _add_commit_stats(
+                        client,
+                        headers=headers,
+                        owner=owner,
+                        repo=repo,
+                        commit=commit,
+                        metrics=result.get_or_create_email(public_email),
+                    )
 
         pulls = await _paginate(
             client,
@@ -298,6 +353,10 @@ def merge_github_results(
         existing.prs_created += metrics.prs_created
         existing.prs_reviewed += metrics.prs_reviewed
         existing.comments += metrics.comments
+    target.commits_fetched += source.commits_fetched
+    target.login_public_emails.update(source.login_public_emails)
+    for login, emails in source.login_git_emails.items():
+        target.login_git_emails.setdefault(login, set()).update(emails)
     return target
 
 
