@@ -298,6 +298,8 @@ async def sync_group_participation(
     github_logins: dict[str, str] = {}
     github_emails: dict[str, str] = {}
     google_emails: dict[str, str] = {}
+    email_canonical: dict[str, str] = {}
+    signup_emails: set[str] = set()
     integrations_by_user: dict[str, dict[str, UserIntegration | None]] = {}
 
     for membership in member_list:
@@ -309,14 +311,19 @@ async def sync_group_participation(
             db, user.id, IntegrationProvider.google
         )
         integrations_by_user[user.id] = {"github": gh, "google": goog}
+        signup = user.email.lower()
+        signup_emails.add(signup)
+        email_canonical[signup] = signup
         if gh and gh.provider_login:
             github_logins[user.id] = gh.provider_login
         else:
-            github_emails[user.id] = user.email.lower()
+            github_emails[user.id] = signup
         if goog and goog.provider_email:
-            google_emails[user.id] = goog.provider_email.lower()
+            oauth_email = goog.provider_email.lower()
+            google_emails[user.id] = oauth_email
+            email_canonical[oauth_email] = signup
         else:
-            google_emails[user.id] = user.email.lower()
+            google_emails[user.id] = signup
 
     github_result = GithubSyncResult()
     repos = await db.scalars(
@@ -365,7 +372,8 @@ async def sync_group_participation(
             "google_token_emails": [email for email, _ in google_tokens],
             "doc_count": len(doc_list),
             "doc_file_ids": [doc.file_id for doc in doc_list],
-            "student_emails": list(google_emails.values()),
+            "student_emails": sorted(signup_emails),
+            "email_alias_count": len(email_canonical),
             "repo_count": len(repo_list),
         },
     )
@@ -375,12 +383,9 @@ async def sync_group_participation(
             "No group member has Google connected. Connect Google in Settings "
             "so version history can be read."
         )
-    if google_tokens and google_emails:
-        email_set = set(google_emails.values())
+    if google_tokens and signup_emails:
         name_to_email = {
-            " ".join(membership.user.name.strip().lower().split()): google_emails[
-                membership.user.id
-            ]
+            " ".join(membership.user.name.strip().lower().split()): membership.user.email.lower()
             for membership in member_list
         }
         for doc in doc_list:
@@ -393,7 +398,8 @@ async def sync_group_participation(
                 doc_result, doc_status = await sync_google_doc(
                     access_token=token,
                     file_id=doc.file_id,
-                    emails=email_set,
+                    signup_emails=signup_emails,
+                    email_canonical=email_canonical,
                     token_holder_email=provider_email,
                     name_to_email=name_to_email,
                 )
@@ -443,10 +449,10 @@ async def sync_group_participation(
 
             if activity_scope_missing:
                 sync_warnings.append(
-                    f'Edit counts for "{doc.title}" are incomplete. Each group '
+                    f'Edit counts for "{doc.title}" may be incomplete. Each group '
                     "member must Disconnect then Connect Google in Settings so "
-                    "CollabTrack can access Drive Activity (required for per-user "
-                    "edit counts). Revision history alone cannot capture all edits."
+                    "CollabTrack can access Drive Activity and People API (needed "
+                    "to identify domain-wide editors), then sync again."
                 )
 
             if (
@@ -502,12 +508,9 @@ async def sync_group_participation(
         if gh_metrics is not None:
             metrics["github"] = gh_metrics.model_dump()
 
-        if goog_integration and goog_integration.provider_email:
-            email = goog_integration.provider_email.lower()
-        else:
-            email = user.email.lower()
-        g_metrics = google_result.by_email.get(email)
-        g_events = google_result.events_by_email.get(email, [])
+        lookup_email = user.email.lower()
+        g_metrics = google_result.by_email.get(lookup_email)
+        g_events = google_result.events_by_email.get(lookup_email, [])
         if g_metrics:
             metrics["google_docs"] = g_metrics.model_dump()
         if g_events:
@@ -515,7 +518,7 @@ async def sync_group_participation(
         google_member_assignment.append(
             {
                 "user_id": user.id,
-                "lookup_email": email,
+                "lookup_email": lookup_email,
                 "has_google_docs_metrics": g_metrics is not None,
                 "edits": g_metrics.edits if g_metrics else 0,
                 "comments": g_metrics.comments if g_metrics else 0,

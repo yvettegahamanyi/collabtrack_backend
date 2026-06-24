@@ -178,10 +178,50 @@ def _resolve_author_email(
     return None, None
 
 
+def _canonicalize_member_email(
+    resolved_email: str | None,
+    signup_emails: set[str],
+    email_aliases: set[str],
+    email_canonical: dict[str, str],
+) -> str | None:
+    """Map a resolved Google identity to a CollabTrack signup email for storage."""
+    if not resolved_email:
+        return None
+    lower = resolved_email.lower()
+    if lower in email_canonical:
+        return email_canonical[lower]
+    if lower in signup_emails:
+        return lower
+    local = lower.split("@", 1)[0]
+    for alias in email_aliases:
+        if alias.split("@", 1)[0] == local:
+            return email_canonical.get(alias, alias)
+    return None
+
+
+def _extend_email_aliases_from_permissions(
+    permission_map: dict[str, str],
+    author_lookup: dict[str, str],
+    signup_emails: set[str],
+    email_canonical: dict[str, str],
+) -> set[str]:
+    """Add file-permission emails that map to group members via name/local-part."""
+    aliases = set(email_canonical.keys())
+    for key, perm_email in permission_map.items():
+        canonical = author_lookup.get(key)
+        if canonical and canonical in signup_emails:
+            perm_lower = perm_email.lower()
+            email_canonical[perm_lower] = canonical
+            aliases.add(perm_lower)
+    return aliases
+
+
 def _attribute_to_member(
     *,
     result: GoogleSyncResult,
-    normalized: set[str],
+    signup_emails: set[str],
+    email_aliases: set[str],
+    email_canonical: dict[str, str],
     author: dict,
     token_holder_email: str | None,
     name_to_email: dict[str, str] | None,
@@ -195,23 +235,25 @@ def _attribute_to_member(
         author,
         token_holder_email,
         name_to_email,
-        member_emails=normalized,
+        member_emails=email_aliases,
     )
     author_name = author.get("displayName")
-    matched_email = resolved_email if resolved_email in normalized else None
-    if matched_email:
-        metrics = result.get_or_create(matched_email)
+    storage_email = _canonicalize_member_email(
+        resolved_email, signup_emails, email_aliases, email_canonical
+    )
+    if storage_email:
+        metrics = result.get_or_create(storage_email)
         current = getattr(metrics, metric_field)
         setattr(metrics, metric_field, current + 1)
         result.record_event(
-            matched_email,
+            storage_email,
             GoogleDocEvent(
                 type=event_type,
                 file_id=file_id,
                 source_id=source_id,
                 author_email=resolved_email,
                 author_name=author_name,
-                matched_email=matched_email,
+                matched_email=storage_email,
                 match_method=match_method,
                 timestamp=timestamp,
             ),
@@ -295,6 +337,18 @@ async def _resolve_person_email(
         params={"personFields": "emailAddresses,names"},
     )
     if resp.status_code != 200:
+        # #region agent log
+        _debug_log(
+            "H12",
+            "google_sync.py:_resolve_person_email:failed",
+            "People API person lookup failed",
+            {
+                "person_name": person_name,
+                "status": resp.status_code,
+                "error": resp.text[:300],
+            },
+        )
+        # #endregion
         cache[person_name] = None
         return None
     data = resp.json()
@@ -305,6 +359,26 @@ async def _resolve_person_email(
             return email
     cache[person_name] = None
     return None
+
+
+def _owner_person_map_from_activities(
+    activities: list[dict],
+    owner_canonical_email: str | None,
+) -> dict[str, str]:
+    """Map Drive Activity owner personName to the file owner's signup email."""
+    if not owner_canonical_email:
+        return {}
+    person_map: dict[str, str] = {}
+    for activity in activities:
+        for target in activity.get("targets") or []:
+            drive_item = target.get("driveItem") or {}
+            owner = drive_item.get("owner") or {}
+            user = owner.get("user") or {}
+            known = user.get("knownUser") or {}
+            person_name = known.get("personName")
+            if person_name:
+                person_map[person_name] = owner_canonical_email
+    return person_map
 
 
 def _activity_timestamp(activity: dict, action: dict | None = None) -> str | None:
@@ -357,6 +431,7 @@ async def _resolve_activity_actor_email(
     token_holder_email: str | None,
     name_to_email: dict[str, str],
     person_cache: dict[str, str | None],
+    person_to_canonical: dict[str, str],
 ) -> tuple[str | None, str | None]:
     user = actor.get("user") or {}
     if user.get("unknownUser"):
@@ -366,6 +441,8 @@ async def _resolve_activity_actor_email(
         if known.get("isCurrentUser") and token_holder_email:
             return token_holder_email.lower(), "me"
         person_name = known.get("personName")
+        if person_name and person_name in person_to_canonical:
+            return person_to_canonical[person_name], "owner_person_map"
         if person_name:
             email = await _resolve_person_email(
                 client, headers, person_name, person_cache
@@ -380,14 +457,16 @@ async def _sync_drive_activity(
     client: httpx.AsyncClient,
     headers: dict[str, str],
     file_id: str,
-    emails: set[str],
+    signup_emails: set[str],
+    email_aliases: set[str],
+    email_canonical: dict[str, str],
+    author_lookup: dict[str, str],
+    owner_canonical_email: str | None,
     token_holder_email: str | None,
-    name_to_email: dict[str, str] | None,
 ) -> tuple[GoogleSyncResult, int | None, str | None, dict | None, list[dict], int]:
     """Query Drive Activity API v2 for EDIT actions only (one count per activity)."""
     result = GoogleSyncResult()
-    normalized = {email.lower() for email in emails}
-    lookup = name_to_email or {}
+    lookup = author_lookup
     person_cache: dict[str, str | None] = {}
     raw_pages: list[dict] = []
     status_code: int | None = None
@@ -395,6 +474,7 @@ async def _sync_drive_activity(
     error_details: dict | None = None
     edit_count = 0
     unattributed_edits = 0
+    all_activities: list[dict] = []
     page_token: str | None = None
 
     while True:
@@ -418,55 +498,90 @@ async def _sync_drive_activity(
             break
         data = resp.json()
         raw_pages.append(data)
-        for activity in data.get("activities") or []:
-            if not _activity_has_edit(activity):
-                continue
-
-            actions = activity.get("actions") or []
-            # One activity = one edit (timestamp = single edit, timeRange = merged edits).
-            edit_count += 1
-            actor = _activity_edit_actor(activity, actions)
-            resolved_email, match_method = await _resolve_activity_actor_email(
-                client=client,
-                headers=headers,
-                actor=actor,
-                token_holder_email=token_holder_email,
-                name_to_email=lookup,
-                person_cache=person_cache,
-            )
-            matched_email = resolved_email if resolved_email in normalized else None
-            if not matched_email and resolved_email:
-                local = resolved_email.split("@", 1)[0]
-                for member_email in normalized:
-                    if member_email.split("@", 1)[0] == local:
-                        matched_email = member_email
-                        match_method = "activity_email_local"
-                        break
-            if not matched_email:
-                unattributed_edits += 1
-            # Timestamp from action when present, else activity (handles both fields).
-            action_for_time = actions[0] if actions else None
-            timestamp = _activity_timestamp(activity, action_for_time)
-            source_id = f"activity:{timestamp}:{edit_count}:edit"
-            if matched_email:
-                metrics = result.get_or_create(matched_email)
-                metrics.edits += 1
-                result.record_event(
-                    matched_email,
-                    GoogleDocEvent(
-                        type="edit",
-                        file_id=file_id,
-                        source_id=source_id,
-                        author_email=resolved_email,
-                        author_name=None,
-                        matched_email=matched_email,
-                        match_method=match_method or "activity",
-                        timestamp=timestamp,
-                    ),
-                )
+        all_activities.extend(data.get("activities") or [])
         page_token = data.get("nextPageToken")
         if not page_token:
             break
+
+    person_to_canonical = _owner_person_map_from_activities(
+        all_activities, owner_canonical_email
+    )
+    unique_actor_persons: set[str] = set()
+    for activity in all_activities:
+        if not _activity_has_edit(activity):
+            continue
+        actor = _activity_edit_actor(activity, activity.get("actions") or [])
+        known = (actor.get("user") or {}).get("knownUser") or {}
+        person_name = known.get("personName")
+        if person_name and person_name not in person_to_canonical:
+            unique_actor_persons.add(person_name)
+
+    for person_name in unique_actor_persons:
+        email = await _resolve_person_email(
+            client, headers, person_name, person_cache
+        )
+        if email:
+            canonical = _canonicalize_member_email(
+                email, signup_emails, email_aliases, email_canonical
+            )
+            if canonical:
+                person_to_canonical[person_name] = canonical
+
+    # #region agent log
+    _debug_log(
+        "H12",
+        "google_sync.py:_sync_drive_activity:person_map",
+        "Activity actor personName resolution map",
+        {
+            "file_id": file_id,
+            "owner_canonical_email": owner_canonical_email,
+            "person_map_size": len(person_to_canonical),
+            "person_to_canonical": person_to_canonical,
+            "unique_actor_persons": len(unique_actor_persons),
+        },
+    )
+    # #endregion
+
+    for activity in all_activities:
+        if not _activity_has_edit(activity):
+            continue
+
+        actions = activity.get("actions") or []
+        edit_count += 1
+        actor = _activity_edit_actor(activity, actions)
+        resolved_email, match_method = await _resolve_activity_actor_email(
+            client=client,
+            headers=headers,
+            actor=actor,
+            token_holder_email=token_holder_email,
+            name_to_email=lookup,
+            person_cache=person_cache,
+            person_to_canonical=person_to_canonical,
+        )
+        storage_email = _canonicalize_member_email(
+            resolved_email, signup_emails, email_aliases, email_canonical
+        )
+        if not storage_email:
+            unattributed_edits += 1
+        action_for_time = actions[0] if actions else None
+        timestamp = _activity_timestamp(activity, action_for_time)
+        source_id = f"activity:{timestamp}:{edit_count}:edit"
+        if storage_email:
+            metrics = result.get_or_create(storage_email)
+            metrics.edits += 1
+            result.record_event(
+                storage_email,
+                GoogleDocEvent(
+                    type="edit",
+                    file_id=file_id,
+                    source_id=source_id,
+                    author_email=resolved_email,
+                    author_name=None,
+                    matched_email=storage_email,
+                    match_method=match_method or "activity",
+                    timestamp=timestamp,
+                ),
+            )
 
     # #region agent log
     _debug_log(
@@ -499,13 +614,15 @@ async def sync_google_doc(
     *,
     access_token: str,
     file_id: str,
-    emails: set[str],
+    signup_emails: set[str],
+    email_canonical: dict[str, str],
     token_holder_email: str | None = None,
     name_to_email: dict[str, str] | None = None,
 ) -> tuple[GoogleSyncResult, GoogleDocSyncStatus]:
     headers = {"Authorization": f"Bearer {access_token}"}
     status = GoogleDocSyncStatus(file_id=file_id)
-    normalized = {email.lower() for email in emails}
+    signup_emails = {email.lower() for email in signup_emails}
+    email_canonical = {alias.lower(): canonical.lower() for alias, canonical in email_canonical.items()}
     revision_author_emails: set[str] = set()
     comment_author_emails: set[str] = set()
 
@@ -514,7 +631,10 @@ async def sync_google_doc(
             client, access_token
         )
         permission_map = await _fetch_permission_name_map(client, file_id, headers)
-        author_lookup = _build_author_lookup(normalized, name_to_email, permission_map)
+        author_lookup = _build_author_lookup(signup_emails, name_to_email, permission_map)
+        email_aliases = _extend_email_aliases_from_permissions(
+            permission_map, author_lookup, signup_emails, email_canonical
+        )
         # #region agent log
         _debug_log(
             "H11",
@@ -526,6 +646,8 @@ async def sync_google_doc(
                 "activity_scope_granted": status.activity_scope_granted,
                 "permission_map_size": len(permission_map),
                 "author_lookup_size": len(author_lookup),
+                "email_alias_count": len(email_aliases),
+                "signup_emails": sorted(signup_emails),
                 "sample_keys": sorted(author_lookup.keys())[:12],
             },
         )
@@ -534,7 +656,7 @@ async def sync_google_doc(
         metadata_resp = await client.get(
             f"{_DRIVE_API}/files/{file_id}",
             headers=headers,
-            params={"fields": "id,name"},
+            params={"fields": "id,name,owners(emailAddress)"},
         )
         status.metadata_status = metadata_resp.status_code
         metadata_error = (
@@ -542,6 +664,15 @@ async def sync_google_doc(
             if metadata_resp.status_code != 200
             else None
         )
+        owner_canonical_email: str | None = None
+        if metadata_resp.status_code == 200:
+            owners = metadata_resp.json().get("owners") or []
+            if owners:
+                owner_email = (owners[0].get("emailAddress") or "").strip().lower()
+                if owner_email:
+                    owner_canonical_email = email_canonical.get(
+                        owner_email, owner_email
+                    )
         # #region agent log
         _debug_log(
             "H4",
@@ -566,9 +697,12 @@ async def sync_google_doc(
             client=client,
             headers=headers,
             file_id=file_id,
-            emails=emails,
+            signup_emails=signup_emails,
+            email_aliases=email_aliases,
+            email_canonical=email_canonical,
+            author_lookup=author_lookup,
+            owner_canonical_email=owner_canonical_email,
             token_holder_email=token_holder_email,
-            name_to_email=author_lookup,
         )
         status.activity_status = activity_status
         status.activity_edit_count = activity_edit_count
@@ -629,7 +763,9 @@ async def sync_google_doc(
             user = revision.get("lastModifyingUser") or {}
             resolved = _attribute_to_member(
                 result=revisions_result,
-                normalized=normalized,
+                signup_emails=signup_emails,
+                email_aliases=email_aliases,
+                email_canonical=email_canonical,
                 author=user,
                 token_holder_email=token_holder_email,
                 name_to_email=author_lookup,
@@ -686,7 +822,9 @@ async def sync_google_doc(
             author = comment.get("author") or {}
             resolved = _attribute_to_member(
                 result=comments_result,
-                normalized=normalized,
+                signup_emails=signup_emails,
+                email_aliases=email_aliases,
+                email_canonical=email_canonical,
                 author=author,
                 token_holder_email=token_holder_email,
                 name_to_email=author_lookup,
@@ -713,7 +851,9 @@ async def sync_google_doc(
                 reply_author = reply.get("author") or {}
                 reply_resolved = _attribute_to_member(
                     result=comments_result,
-                    normalized=normalized,
+                    signup_emails=signup_emails,
+                    email_aliases=email_aliases,
+                    email_canonical=email_canonical,
                     author=reply_author,
                     token_holder_email=token_holder_email,
                     name_to_email=author_lookup,
@@ -814,6 +954,15 @@ async def sync_google_doc(
         if use_activity_edits:
             merge_google_results(result, activity_result)
             status.activity_source = "activity"
+            for member_email in signup_emails:
+                activity_edits = result.by_email.get(member_email)
+                rev_metrics = revisions_result.by_email.get(member_email)
+                if (
+                    (not activity_edits or activity_edits.edits == 0)
+                    and rev_metrics
+                    and rev_metrics.edits > 0
+                ):
+                    result.get_or_create(member_email).edits += rev_metrics.edits
         else:
             merge_google_results(result, revisions_result)
             status.activity_source = "revisions"

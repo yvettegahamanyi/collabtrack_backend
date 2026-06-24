@@ -47,7 +47,8 @@ _GOOGLE_SCOPES = (
     "openid email profile "
     "https://www.googleapis.com/auth/drive.readonly "
     "https://www.googleapis.com/auth/documents.readonly "
-    "https://www.googleapis.com/auth/drive.activity.readonly"
+    "https://www.googleapis.com/auth/drive.activity.readonly "
+    "https://www.googleapis.com/auth/people.readonly"
 )
 
 _GITHUB_REPO_RE = re.compile(
