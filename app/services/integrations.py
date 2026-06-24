@@ -132,6 +132,7 @@ def build_github_connect_url(user: User) -> str:
             "redirect_uri": GITHUB_CALLBACK_URL,
             "scope": _GITHUB_SCOPES,
             "state": state,
+            "prompt": "select_account",
         }
     )
     return f"{_GITHUB_AUTH_URL}?{params}"
