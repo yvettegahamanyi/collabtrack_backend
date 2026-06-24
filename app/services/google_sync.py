@@ -341,22 +341,83 @@ async def _token_has_people_lookup_scope(
     )
 
 
+_DIRECTORY_SOURCES = (
+    "DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT,"
+    "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE"
+)
+
+
+def _collect_unknown_person_edit_counts(
+    activities: list[dict],
+    person_to_canonical: dict[str, str],
+) -> dict[str, int]:
+    """Count EDIT activities per Activity API personName not yet mapped."""
+    counts: dict[str, int] = {}
+    for activity in activities:
+        if not _activity_has_edit(activity):
+            continue
+        actions = activity.get("actions") or []
+        actor = _activity_edit_actor(activity, actions)
+        known = (actor.get("user") or {}).get("knownUser") or {}
+        person_name = known.get("personName")
+        if person_name and person_name not in person_to_canonical:
+            counts[person_name] = counts.get(person_name, 0) + 1
+    return counts
+
+
+def _infer_person_map_for_unmatched_members(
+    person_to_canonical: dict[str, str],
+    activities: list[dict],
+    signup_emails: set[str],
+) -> dict[str, str]:
+    """
+    When directory lookup cannot resolve person IDs, infer mapping for domain-wide
+    editors who were never individually shared on the file.
+    Safe when exactly one group member and one unknown Activity person remain.
+    """
+    mapped_canonicals = set(person_to_canonical.values())
+    unmatched_members = sorted(e for e in signup_emails if e not in mapped_canonicals)
+    unknown_edits = _collect_unknown_person_edit_counts(
+        activities, person_to_canonical
+    )
+    if not unmatched_members or not unknown_edits:
+        return {}
+    if len(unmatched_members) == 1 and len(unknown_edits) == 1:
+        person_id = next(iter(unknown_edits))
+        return {person_id: unmatched_members[0]}
+    return {}
+
+
 async def _build_directory_person_map_from_members(
     client: httpx.AsyncClient,
     headers: dict[str, str],
     signup_emails: set[str],
+    email_aliases: set[str],
+    email_canonical: dict[str, str],
+    author_lookup: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Map domain directory person resourceNames to CollabTrack signup emails."""
     person_map: dict[str, str] = {}
+    queries: set[str] = set()
     for email in signup_emails:
+        queries.add(email)
+        queries.add(email.split("@", 1)[0])
+    if author_lookup:
+        for key in author_lookup:
+            if " " in key or "." in key:
+                queries.add(key)
+
+    for query in sorted(queries):
+        if not query.strip():
+            continue
         resp = await client.get(
             "https://people.googleapis.com/v1/people:searchDirectoryPeople",
             headers=headers,
             params={
-                "query": email,
-                "readMask": "emailAddresses",
-                "sources": "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE",
-                "pageSize": 5,
+                "query": query,
+                "readMask": "emailAddresses,names",
+                "sources": _DIRECTORY_SOURCES,
+                "pageSize": 10,
             },
         )
         if resp.status_code != 200:
@@ -366,22 +427,75 @@ async def _build_directory_person_map_from_members(
                 "google_sync.py:_build_directory_person_map:failed",
                 "Directory people search failed",
                 {
-                    "email": email,
+                    "query": query,
                     "status": resp.status_code,
                     "error": resp.text[:300],
                 },
             )
             # #endregion
             continue
-        for person in resp.json().get("people") or []:
+        payload = resp.json()
+        people = payload.get("people") or []
+        if not people:
+            # #region agent log
+            _debug_log(
+                "H15",
+                "google_sync.py:_build_directory_person_map:empty",
+                "Directory people search returned no results",
+                {
+                    "query": query,
+                    "total_size": payload.get("totalSize"),
+                },
+            )
+            # #endregion
+            continue
+        for person in people:
             resource_name = person.get("resourceName")
             if not resource_name:
                 continue
+            matched_canonical: str | None = None
+            directory_emails: list[str] = []
             for entry in person.get("emailAddresses") or []:
                 resolved = (entry.get("value") or "").strip().lower()
-                if resolved == email:
-                    person_map[resource_name] = email
+                if not resolved:
+                    continue
+                directory_emails.append(resolved)
+                canonical = _canonicalize_member_email(
+                    resolved, signup_emails, email_aliases, email_canonical
+                )
+                if canonical:
+                    matched_canonical = canonical
                     break
+            if not matched_canonical and author_lookup:
+                for name_entry in person.get("names") or []:
+                    display = (
+                        name_entry.get("displayName")
+                        or name_entry.get("unstructuredName")
+                        or ""
+                    ).strip()
+                    if not display:
+                        continue
+                    matched_canonical = (
+                        author_lookup.get(_normalize_person_name(display))
+                        or author_lookup.get(display.lower())
+                    )
+                    if matched_canonical:
+                        break
+            if matched_canonical:
+                person_map[resource_name] = matched_canonical
+                # #region agent log
+                _debug_log(
+                    "H14",
+                    "google_sync.py:_build_directory_person_map:matched",
+                    "Directory person mapped to signup email",
+                    {
+                        "query": query,
+                        "resource_name": resource_name,
+                        "canonical_email": matched_canonical,
+                        "directory_emails": directory_emails,
+                    },
+                )
+                # #endregion
     return person_map
 
 
@@ -419,6 +533,19 @@ async def _resolve_person_email(
         if email:
             cache[person_name] = email
             return email
+    # #region agent log
+    _debug_log(
+        "H12",
+        "google_sync.py:_resolve_person_email:no_email",
+        "People API person lookup returned no email addresses",
+        {
+            "person_name": person_name,
+            "name_fields": [
+                n.get("displayName") for n in (data.get("names") or [])
+            ],
+        },
+    )
+    # #endregion
     cache[person_name] = None
     return None
 
@@ -635,7 +762,12 @@ async def _sync_drive_activity(
     people_lookup_cache: dict[str, str | None] = {}
     if people_lookup_scope_granted:
         directory_person_map = await _build_directory_person_map_from_members(
-            client, headers, signup_emails
+            client,
+            headers,
+            signup_emails,
+            email_aliases,
+            email_canonical,
+            author_lookup,
         )
         person_to_canonical.update(directory_person_map)
         people_lookup_cache = await _enrich_person_map_via_people_api(
@@ -647,6 +779,24 @@ async def _sync_drive_activity(
             email_aliases,
             email_canonical,
         )
+    inferred_person_map = _infer_person_map_for_unmatched_members(
+        person_to_canonical,
+        all_activities,
+        signup_emails,
+    )
+    if inferred_person_map:
+        person_to_canonical.update(inferred_person_map)
+        # #region agent log
+        _debug_log(
+            "H16",
+            "google_sync.py:_sync_drive_activity:inferred_person_map",
+            "Inferred Activity personName for unmatched group member",
+            {
+                "inferred_person_map": inferred_person_map,
+                "reason": "single_unmatched_member_single_unknown_person",
+            },
+        )
+        # #endregion
 
     # #region agent log
     _debug_log(

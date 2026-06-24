@@ -393,8 +393,8 @@ async def sync_group_participation(
             last_status = None
             best_result: GoogleSyncResult | None = None
             best_score = -1
-            activity_scope_missing = False
-            people_lookup_scope_missing = False
+            activity_scope_available = False
+            people_lookup_scope_available = False
             for provider_email, token in google_tokens:
                 doc_result, doc_status = await sync_google_doc(
                     access_token=token,
@@ -405,13 +405,10 @@ async def sync_group_participation(
                     name_to_email=name_to_email,
                 )
                 last_status = doc_status
-                if (
-                    not doc_status.activity_scope_granted
-                    or doc_status.activity_status == 403
-                ):
-                    activity_scope_missing = True
-                if not doc_status.people_lookup_scope_granted:
-                    people_lookup_scope_missing = True
+                if doc_status.activity_scope_granted and doc_status.activity_status != 403:
+                    activity_scope_available = True
+                if doc_status.people_lookup_scope_granted:
+                    people_lookup_scope_available = True
                 match_score = sum(
                     metrics.edits + metrics.comments
                     for metrics in doc_result.by_email.values()
@@ -451,14 +448,29 @@ async def sync_group_participation(
             if best_result is not None:
                 merge_google_results(google_result, best_result)
 
-            if people_lookup_scope_missing:
+            # #region agent log
+            _debug_log(
+                "H-WARN",
+                "participation.py:sync_group_participation:scope_warning",
+                "Google scope availability for sync warnings",
+                {
+                    "group_id": group.id,
+                    "file_id": doc.file_id,
+                    "google_token_count": len(google_tokens),
+                    "people_lookup_scope_available": people_lookup_scope_available,
+                    "activity_scope_available": activity_scope_available,
+                    "best_score": best_score,
+                },
+            )
+            # #endregion
+            if google_tokens and not people_lookup_scope_available:
                 sync_warnings.append(
                     f'Edit counts for "{doc.title}" may miss domain-wide editors. '
                     "Disconnect then Connect Google in Settings so CollabTrack "
                     "can access contacts.readonly and directory.readonly scopes, "
                     "then sync again."
                 )
-            if activity_scope_missing:
+            if google_tokens and not activity_scope_available:
                 sync_warnings.append(
                     f'Edit counts for "{doc.title}" may be incomplete. '
                     "Reconnect Google in Settings (Disconnect → Connect) so "
