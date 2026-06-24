@@ -12,33 +12,6 @@ from app.schemas.participation import GoogleDocsMetrics
 
 _DRIVE_API = "https://www.googleapis.com/drive/v3"
 _ACTIVITY_API = "https://driveactivity.googleapis.com/v2/activity:query"
-_DEBUG_LOG = "/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-addfa8.log"
-_DEBUG_SESSION = "addfa8"
-
-
-def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    # #region agent log
-    try:
-        Path(_DEBUG_LOG).parent.mkdir(parents=True, exist_ok=True)
-        with open(_DEBUG_LOG, "a", encoding="utf-8") as log_file:
-            log_file.write(
-                json.dumps(
-                    {
-                        "sessionId": _DEBUG_SESSION,
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                        "runId": "google-debug",
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
-
 
 def _parse_google_api_error(resp: httpx.Response) -> dict[str, str | int | None]:
     """Extract structured error fields from a Google API error response."""
@@ -513,18 +486,6 @@ async def _resolve_person_email(
         params={"personFields": "emailAddresses,names"},
     )
     if resp.status_code != 200:
-        # #region agent log
-        _debug_log(
-            "H12",
-            "google_sync.py:_resolve_person_email:failed",
-            "People API person lookup failed",
-            {
-                "person_name": person_name,
-                "status": resp.status_code,
-                "error": resp.text[:300],
-            },
-        )
-        # #endregion
         cache[person_name] = None
         return None
     data = resp.json()
@@ -533,19 +494,6 @@ async def _resolve_person_email(
         if email:
             cache[person_name] = email
             return email
-    # #region agent log
-    _debug_log(
-        "H12",
-        "google_sync.py:_resolve_person_email:no_email",
-        "People API person lookup returned no email addresses",
-        {
-            "person_name": person_name,
-            "name_fields": [
-                n.get("displayName") for n in (data.get("names") or [])
-            ],
-        },
-    )
-    # #endregion
     cache[person_name] = None
     return None
 
@@ -786,33 +734,7 @@ async def _sync_drive_activity(
     )
     if inferred_person_map:
         person_to_canonical.update(inferred_person_map)
-        # #region agent log
-        _debug_log(
-            "H16",
-            "google_sync.py:_sync_drive_activity:inferred_person_map",
-            "Inferred Activity personName for unmatched group member",
-            {
-                "inferred_person_map": inferred_person_map,
-                "reason": "single_unmatched_member_single_unknown_person",
-            },
-        )
-        # #endregion
 
-    # #region agent log
-    _debug_log(
-        "H12",
-        "google_sync.py:_sync_drive_activity:person_map",
-        "Activity actor personName resolution map",
-        {
-            "file_id": file_id,
-            "owner_canonical_email": owner_canonical_email,
-            "people_lookup_scope_granted": people_lookup_scope_granted,
-            "person_map_size": len(person_to_canonical),
-            "person_to_canonical": person_to_canonical,
-            "people_lookup_results": people_lookup_cache,
-        },
-    )
-    # #endregion
 
     for activity in all_activities:
         if not _activity_has_edit(activity):
@@ -851,22 +773,6 @@ async def _sync_drive_activity(
                 ),
             )
 
-    # #region agent log
-    _debug_log(
-        "H1-H4",
-        "google_sync.py:_sync_drive_activity:summary",
-        "Activity edit attribution summary",
-        {
-            "file_id": file_id,
-            "edit_count": edit_count,
-            "unattributed_edits": unattributed_edits,
-            "attributed_emails": list(result.by_email.keys()),
-            "per_email_edits": {
-                email: metrics.edits for email, metrics in result.by_email.items()
-            },
-        },
-    )
-    # #endregion
 
     return (
         result,
@@ -906,24 +812,6 @@ async def sync_google_doc(
         email_aliases = _extend_email_aliases_from_permissions(
             permission_map, author_lookup, signup_emails, email_canonical
         )
-        # #region agent log
-        _debug_log(
-            "H11",
-            "google_sync.py:sync_google_doc:author_lookup",
-            "Author lookup keys for member matching",
-            {
-                "file_id": file_id,
-                "token_holder_email": token_holder_email,
-                "activity_scope_granted": status.activity_scope_granted,
-                "people_lookup_scope_granted": status.people_lookup_scope_granted,
-                "permission_map_size": len(permission_map),
-                "author_lookup_size": len(author_lookup),
-                "email_alias_count": len(email_aliases),
-                "signup_emails": sorted(signup_emails),
-                "sample_keys": sorted(author_lookup.keys())[:12],
-            },
-        )
-        # #endregion
 
         metadata_resp = await client.get(
             f"{_DRIVE_API}/files/{file_id}",
@@ -945,18 +833,6 @@ async def sync_google_doc(
                     owner_canonical_email = email_canonical.get(
                         owner_email, owner_email
                     )
-        # #region agent log
-        _debug_log(
-            "H4",
-            "google_sync.py:sync_google_doc:metadata_probe",
-            "Drive file metadata probe",
-            {
-                "file_id": file_id,
-                "metadata_status": metadata_resp.status_code,
-                "metadata_error": metadata_error,
-            },
-        )
-        # #endregion
 
         (
             activity_result,
@@ -982,24 +858,6 @@ async def sync_google_doc(
         activity_edit_match_score = sum(
             m.edits for m in activity_result.by_email.values()
         )
-        # #region agent log
-        _debug_log(
-            "H10",
-            "google_sync.py:sync_google_doc:drive_activity_raw",
-            "Drive Activity API raw response pages",
-            {
-                "file_id": file_id,
-                "token_holder_email": token_holder_email,
-                "activity_status": activity_status,
-                "page_count": len(activity_raw_pages),
-                "raw_pages": activity_raw_pages,
-                "activity_edit_count": activity_edit_count,
-                "activity_matched_emails": list(activity_result.by_email.keys()),
-                "activity_edit_match_score": activity_edit_match_score,
-                "activity_error": activity_error,
-            },
-        )
-        # #endregion
 
         revisions_result = GoogleSyncResult()
         revisions, revisions_status, revisions_error, revisions_details, revisions_raw_pages = await _paginate(
@@ -1015,21 +873,6 @@ async def sync_google_doc(
             },
             capture_raw_pages=True,
         )
-        # #region agent log
-        _debug_log(
-            "H8",
-            "google_sync.py:sync_google_doc:drive_revisions_raw",
-            "Drive revisions API raw response pages",
-            {
-                "file_id": file_id,
-                "token_holder_email": token_holder_email,
-                "revisions_status": revisions_status,
-                "page_count": len(revisions_raw_pages),
-                "raw_pages": revisions_raw_pages,
-                "parsed_revision_count": len(revisions),
-            },
-        )
-        # #endregion
         status.revisions_status = revisions_status
         revision_author_debug: list[dict] = []
         for revision in revisions:
@@ -1060,34 +903,11 @@ async def sync_google_doc(
             )
             if resolved:
                 revision_author_emails.add(resolved)
-        # #region agent log
-        _debug_log(
-            "H7",
-            "google_sync.py:sync_google_doc:revision_authors",
-            "Revision author resolution details",
-            {"file_id": file_id, "revisions": revision_author_debug},
-        )
-        # #endregion
 
         comments_result = GoogleSyncResult()
         comments, comments_status, comments_error, comments_details, comments_raw_pages = await _paginate_comments(
             client, file_id, headers, capture_raw_pages=True
         )
-        # #region agent log
-        _debug_log(
-            "H8",
-            "google_sync.py:sync_google_doc:drive_comments_raw",
-            "Drive comments API raw response pages",
-            {
-                "file_id": file_id,
-                "token_holder_email": token_holder_email,
-                "comments_status": comments_status,
-                "page_count": len(comments_raw_pages),
-                "raw_pages": comments_raw_pages,
-                "parsed_comment_count": len(comments),
-            },
-        )
-        # #endregion
         status.comments_status = comments_status
         comment_author_debug: list[dict] = []
         reply_count = 0
@@ -1138,26 +958,6 @@ async def sync_google_doc(
                 )
                 if reply_resolved:
                     comment_author_emails.add(reply_resolved)
-        # #region agent log
-        _debug_log(
-            "H5-H6",
-            "google_sync.py:sync_google_doc:comment_attribution",
-            "Drive comments + replies attribution",
-            {
-                "file_id": file_id,
-                "top_level_comments": len(comments),
-                "nested_replies": reply_count,
-                "total_comment_metric": sum(
-                    m.comments for m in comments_result.by_email.values()
-                ),
-                "per_email_comments": {
-                    email: metrics.comments
-                    for email, metrics in comments_result.by_email.items()
-                },
-                "comment_authors": comment_author_debug,
-            },
-        )
-        # #endregion
 
         docs_api_resp = await client.get(
             f"https://docs.googleapis.com/v1/documents/{file_id}",
@@ -1169,19 +969,6 @@ async def sync_google_doc(
             docs_api_body = docs_api_resp.json()
         except ValueError:
             docs_api_body = docs_api_resp.text[:2000]
-        # #region agent log
-        _debug_log(
-            "H9",
-            "google_sync.py:sync_google_doc:docs_api_raw",
-            "Google Docs API raw response",
-            {
-                "file_id": file_id,
-                "token_holder_email": token_holder_email,
-                "docs_status": docs_api_resp.status_code,
-                "docs_body": docs_api_body,
-            },
-        )
-        # #endregion
 
         metadata_full_resp = await client.get(
             f"{_DRIVE_API}/files/{file_id}",
@@ -1198,19 +985,6 @@ async def sync_google_doc(
             metadata_full_body = metadata_full_resp.json()
         except ValueError:
             metadata_full_body = metadata_full_resp.text[:2000]
-        # #region agent log
-        _debug_log(
-            "H8",
-            "google_sync.py:sync_google_doc:drive_metadata_raw",
-            "Drive files.get raw response",
-            {
-                "file_id": file_id,
-                "token_holder_email": token_holder_email,
-                "metadata_status": metadata_full_resp.status_code,
-                "metadata_body": metadata_full_body,
-            },
-        )
-        # #endregion
 
         revision_edit_match_score = sum(
             m.edits for m in revisions_result.by_email.values()
@@ -1270,54 +1044,7 @@ async def sync_google_doc(
                 revisions_details or {}
             )
 
-        # #region agent log
-        _debug_log(
-            "H1",
-            "google_sync.py:sync_google_doc:api_errors",
-            "Drive API error classification",
-            {
-                "file_id": file_id,
-                "metadata_status": status.metadata_status,
-                "revisions_status": revisions_status,
-                "comments_status": comments_status,
-                "activity_status": activity_status,
-                "activity_source": status.activity_source,
-                "activity_edit_count": activity_edit_count,
-                "activity_edit_match_score": activity_edit_match_score,
-                "revision_edit_match_score": revision_edit_match_score,
-                "use_activity_edits": use_activity_edits,
-                "revisions_details": revisions_details,
-                "comments_details": comments_details,
-                "failure_kind": status.failure_kind,
-            },
-        )
-        # #endregion
 
-        # #region agent log
-        _debug_log(
-            "G4",
-            "google_sync.py:sync_google_doc:complete",
-            "Google doc sync finished",
-            {
-                "file_id": file_id,
-                "revisions_status": revisions_status,
-                "comments_status": comments_status,
-                "activity_status": activity_status,
-                "activity_source": status.activity_source,
-                "revision_count": len(revisions),
-                "comment_count": status.comment_count,
-                "activity_edit_count": activity_edit_count,
-                "activity_edit_match_score": activity_edit_match_score,
-                "revision_edit_match_score": revision_edit_match_score,
-                "use_activity_edits": use_activity_edits,
-                "revision_author_emails": sorted(revision_author_emails),
-                "comment_author_emails": sorted(comment_author_emails),
-                "matched_emails": list(result.by_email.keys()),
-                "error": status.error,
-                "failure_kind": status.failure_kind,
-            },
-        )
-        # #endregion
 
     return result, status
 

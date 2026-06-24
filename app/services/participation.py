@@ -51,32 +51,6 @@ from app.services.meetings import get_engagement_scores_by_user
 
 _GITHUB_API = "https://api.github.com"
 _MIN_SYNC_INTERVAL_SECONDS = 60
-_DEBUG_LOG = "/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-29e602.log"
-
-
-def _debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    # #region agent log
-    try:
-        Path(_DEBUG_LOG).parent.mkdir(parents=True, exist_ok=True)
-        with open(_DEBUG_LOG, "a", encoding="utf-8") as log_file:
-            log_file.write(
-                json.dumps(
-                    {
-                        "sessionId": "29e602",
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                        "runId": "google-debug",
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
-
 
 def _normalize_github_identifier(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
@@ -361,23 +335,6 @@ async def sync_group_participation(
     doc_list = list(docs.all())
     google_tokens = await _find_google_tokens_for_group(group, db)
     sync_warnings: list[str] = []
-    # #region agent log
-    _debug_log(
-        "G1",
-        "participation.py:sync_group_participation:google_setup",
-        "Google sync prerequisites",
-        {
-            "group_id": group.id,
-            "google_token_count": len(google_tokens),
-            "google_token_emails": [email for email, _ in google_tokens],
-            "doc_count": len(doc_list),
-            "doc_file_ids": [doc.file_id for doc in doc_list],
-            "student_emails": sorted(signup_emails),
-            "email_alias_count": len(email_canonical),
-            "repo_count": len(repo_list),
-        },
-    )
-    # #endregion
     if doc_list and not google_tokens:
         sync_warnings.append(
             "No group member has Google connected. Connect Google in Settings "
@@ -498,21 +455,6 @@ async def sync_group_participation(
                     _google_doc_sync_warning(doc.title, last_status)
                 )
 
-    # #region agent log
-    _debug_log(
-        "G2",
-        "participation.py:sync_group_participation:google_results",
-        "Google sync aggregated results",
-        {
-            "group_id": group.id,
-            "by_email_keys": list(google_result.by_email.keys()),
-            "by_email_metrics": {
-                email: metrics.model_dump()
-                for email, metrics in google_result.by_email.items()
-            },
-        },
-    )
-    # #endregion
 
     synced_at = datetime.now(timezone.utc)
     members_synced = 0
@@ -570,20 +512,6 @@ async def sync_group_participation(
             )
         members_synced += 1
 
-    # #region agent log
-    _debug_log(
-        "G3",
-        "participation.py:sync_group_participation:google_assignment",
-        "Per-member Google Docs metric assignment",
-        {
-            "group_id": group.id,
-            "members_with_google_metrics": sum(
-                1 for entry in google_member_assignment if entry["has_google_docs_metrics"]
-            ),
-            "per_member": google_member_assignment,
-        },
-    )
-    # #endregion
 
     return SyncOut(
         group_id=group.id,
