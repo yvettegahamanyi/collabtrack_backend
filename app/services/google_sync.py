@@ -624,15 +624,13 @@ async def _sync_drive_activity(
     owner_canonical_email: str | None,
     token_holder_email: str | None,
     people_lookup_scope_granted: bool = False,
-) -> tuple[GoogleSyncResult, int | None, str | None, dict | None, list[dict], int]:
+) -> tuple[GoogleSyncResult, int | None, str | None, dict | None, int]:
     """Query Drive Activity API v2 for EDIT actions only (one count per activity)."""
     result = GoogleSyncResult()
-    raw_pages: list[dict] = []
     status_code: int | None = None
     error_message: str | None = None
     error_details: dict | None = None
     edit_count = 0
-    unattributed_edits = 0
     all_activities: list[dict] = []
     page_token: str | None = None
 
@@ -650,13 +648,8 @@ async def _sync_drive_activity(
         if resp.status_code != 200:
             error_details = _parse_google_api_error(resp)
             error_message = str(error_details.get("message"))
-            try:
-                raw_pages.append(resp.json())
-            except ValueError:
-                raw_pages.append({"raw_text": resp.text[:2000]})
             break
         data = resp.json()
-        raw_pages.append(data)
         all_activities.extend(data.get("activities") or [])
         page_token = data.get("nextPageToken")
         if not page_token:
@@ -668,7 +661,6 @@ async def _sync_drive_activity(
         token_holder_email,
         email_canonical,
     )
-    people_lookup_cache: dict[str, str | None] = {}
     if people_lookup_scope_granted:
         directory_person_map = await _build_directory_person_map_from_members(
             client,
@@ -679,7 +671,7 @@ async def _sync_drive_activity(
             author_lookup,
         )
         person_to_canonical.update(directory_person_map)
-        people_lookup_cache = await _enrich_person_map_via_people_api(
+        await _enrich_person_map_via_people_api(
             client,
             headers,
             all_activities,
@@ -712,8 +704,6 @@ async def _sync_drive_activity(
         storage_email = _canonicalize_member_email(
             resolved_email, signup_emails, email_aliases, email_canonical
         )
-        if not storage_email:
-            unattributed_edits += 1
         action_for_time = actions[0] if actions else None
         timestamp = _activity_timestamp(activity, action_for_time)
         source_id = f"activity:{timestamp}:{edit_count}:edit"
@@ -740,7 +730,6 @@ async def _sync_drive_activity(
         status_code,
         error_message,
         error_details,
-        raw_pages,
         edit_count,
     )
 
@@ -758,8 +747,6 @@ async def sync_google_doc(
     status = GoogleDocSyncStatus(file_id=file_id)
     signup_emails = {email.lower() for email in signup_emails}
     email_canonical = {alias.lower(): canonical.lower() for alias, canonical in email_canonical.items()}
-    revision_author_emails: set[str] = set()
-    comment_author_emails: set[str] = set()
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         status.activity_scope_granted = await _token_has_activity_scope(
@@ -780,11 +767,6 @@ async def sync_google_doc(
             params={"fields": "id,name,owners(emailAddress)"},
         )
         status.metadata_status = metadata_resp.status_code
-        metadata_error = (
-            _parse_google_api_error(metadata_resp)
-            if metadata_resp.status_code != 200
-            else None
-        )
         owner_canonical_email: str | None = None
         if metadata_resp.status_code == 200:
             owners = metadata_resp.json().get("owners") or []
@@ -800,7 +782,6 @@ async def sync_google_doc(
             activity_status,
             activity_error,
             activity_details,
-            activity_raw_pages,
             activity_edit_count,
         ) = await _sync_drive_activity(
             client=client,
@@ -821,7 +802,7 @@ async def sync_google_doc(
         )
 
         revisions_result = GoogleSyncResult()
-        revisions, revisions_status, revisions_error, revisions_details, revisions_raw_pages = await _paginate(
+        revisions, revisions_status, revisions_error, revisions_details, _ = await _paginate(
             client,
             f"{_DRIVE_API}/files/{file_id}/revisions",
             headers,
@@ -832,13 +813,11 @@ async def sync_google_doc(
                     "(emailAddress,displayName,me)),nextPageToken"
                 ),
             },
-            capture_raw_pages=True,
         )
         status.revisions_status = revisions_status
-        revision_author_debug: list[dict] = []
         for revision in revisions:
             user = revision.get("lastModifyingUser") or {}
-            resolved = _attribute_to_member(
+            _attribute_to_member(
                 result=revisions_result,
                 signup_emails=signup_emails,
                 email_aliases=email_aliases,
@@ -852,29 +831,16 @@ async def sync_google_doc(
                 timestamp=revision.get("modifiedTime"),
                 metric_field="edits",
             )
-            revision_author_debug.append(
-                {
-                    "revision_id": revision.get("id"),
-                    "author_keys": sorted(user.keys()),
-                    "has_email": bool(user.get("emailAddress")),
-                    "me": user.get("me"),
-                    "display_name": user.get("displayName"),
-                    "resolved_email": resolved,
-                }
-            )
-            if resolved:
-                revision_author_emails.add(resolved)
 
         comments_result = GoogleSyncResult()
-        comments, comments_status, comments_error, comments_details, comments_raw_pages = await _paginate_comments(
-            client, file_id, headers, capture_raw_pages=True
+        comments, comments_status, comments_error, comments_details, _ = await _paginate_comments(
+            client, file_id, headers
         )
         status.comments_status = comments_status
-        comment_author_debug: list[dict] = []
         reply_count = 0
         for comment in comments:
             author = comment.get("author") or {}
-            resolved = _attribute_to_member(
+            _attribute_to_member(
                 result=comments_result,
                 signup_emails=signup_emails,
                 email_aliases=email_aliases,
@@ -888,22 +854,10 @@ async def sync_google_doc(
                 timestamp=comment.get("createdTime"),
                 metric_field="comments",
             )
-            comment_author_debug.append(
-                {
-                    "comment_id": comment.get("id"),
-                    "author_keys": sorted(author.keys()),
-                    "has_email": bool(author.get("emailAddress")),
-                    "me": author.get("me"),
-                    "display_name": author.get("displayName"),
-                    "resolved_email": resolved,
-                }
-            )
-            if resolved:
-                comment_author_emails.add(resolved)
             for reply in comment.get("replies") or []:
                 reply_count += 1
                 reply_author = reply.get("author") or {}
-                reply_resolved = _attribute_to_member(
+                _attribute_to_member(
                     result=comments_result,
                     signup_emails=signup_emails,
                     email_aliases=email_aliases,
@@ -917,35 +871,6 @@ async def sync_google_doc(
                     timestamp=reply.get("createdTime"),
                     metric_field="comments",
                 )
-                if reply_resolved:
-                    comment_author_emails.add(reply_resolved)
-
-        docs_api_resp = await client.get(
-            f"https://docs.googleapis.com/v1/documents/{file_id}",
-            headers=headers,
-            params={"fields": "documentId,title,revisionId"},
-        )
-        docs_api_body: dict | str
-        try:
-            docs_api_body = docs_api_resp.json()
-        except ValueError:
-            docs_api_body = docs_api_resp.text[:2000]
-
-        metadata_full_resp = await client.get(
-            f"{_DRIVE_API}/files/{file_id}",
-            headers=headers,
-            params={
-                "fields": (
-                    "id,name,mimeType,modifiedTime,createdTime,owners,"
-                    "lastModifyingUser,version,headRevisionId,capabilities"
-                ),
-            },
-        )
-        metadata_full_body: dict | str
-        try:
-            metadata_full_body = metadata_full_resp.json()
-        except ValueError:
-            metadata_full_body = metadata_full_resp.text[:2000]
 
         revision_edit_match_score = sum(
             m.edits for m in revisions_result.by_email.values()

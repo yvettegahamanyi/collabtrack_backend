@@ -426,8 +426,6 @@ async def sync_group_participation(
 
     for membership in member_list:
         user = membership.user
-        user_integrations = integrations_by_user[user.id]
-        goog_integration = user_integrations["google"]
 
         metrics: dict = {}
         gh_metrics = github_metrics_by_user.get(user.id)

@@ -42,7 +42,7 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
     if reader.fieldnames is None:
         raise MeetingParseError("Attendance CSV is empty or missing a header row.")
 
-    required = {"Name", "Duration_Minutes", "Facilitator"}
+    required = {"Name", "Email", "Duration_Minutes", "Facilitator"}
     missing = required - set(reader.fieldnames)
     if missing:
         raise MeetingParseError(
@@ -57,13 +57,17 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
 
         duration_raw = (row.get("Duration_Minutes") or "").strip()
         facilitator_raw = (row.get("Facilitator") or "").strip()
+        email_raw = (row.get("Email") or "").strip()
         if not duration_raw or not facilitator_raw:
             raise MeetingParseError(
                 f"Attendance CSV row {row_num}: Duration_Minutes and Facilitator are required."
             )
+        if not email_raw:
+            raise MeetingParseError(
+                f"Attendance CSV row {row_num}: Email is required."
+            )
 
-        email_raw = (row.get("Email") or "").strip()
-        email = email_raw.lower() if email_raw else None
+        email = email_raw.lower()
 
         try:
             duration = int(duration_raw)
@@ -87,6 +91,28 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
         raise MeetingParseError("Attendance CSV contains no student rows.")
 
     return attendance
+
+
+@dataclass
+class AttendanceMemberRow:
+    name: str
+    email: str
+    duration_minutes: int
+    was_facilitator: bool
+
+
+def parse_attendance_members(content: str) -> list[AttendanceMemberRow]:
+    """Parse attendance CSV and return roster rows with required emails."""
+    attendance = parse_attendance_csv(content)
+    return [
+        AttendanceMemberRow(
+            name=name,
+            email=record.email or "",
+            duration_minutes=record.duration_minutes,
+            was_facilitator=record.was_facilitator,
+        )
+        for name, record in attendance.items()
+    ]
 
 
 def parse_transcript_or_chat(content: str, *, label: str) -> dict[str, int]:

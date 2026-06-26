@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.models import AccountStatus, GroupMemberRole, ServiceType
+from app.models import AccountStatus, GroupMemberRole, ReportStatus, ServiceType
 
 
 class GroupCreate(BaseModel):
@@ -30,6 +30,9 @@ class GroupOut(BaseModel):
     doc_weight: float | None
     transcript_weight: float | None
     owner_id: str
+    assignment_id: str | None = None
+    group_number: int | None = None
+    report_status: ReportStatus | None = None
     created_at: datetime
 
 

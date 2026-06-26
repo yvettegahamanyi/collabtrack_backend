@@ -108,6 +108,19 @@ class MeetingFileType(str, enum.Enum):
     CHAT = "CHAT"
 
 
+class ReportStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    PROCESSING = "PROCESSING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
+class ContributionReportStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
 # ---------------------------------------------------------------------------
 # Tables
 # ---------------------------------------------------------------------------
@@ -153,6 +166,50 @@ class User(Base):
     )
     password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
+    )
+    classes_taught: Mapped[list["CourseClass"]] = relationship(
+        back_populates="instructor", cascade="all, delete-orphan"
+    )
+
+
+class CourseClass(Base):
+    __tablename__ = "classes"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    name: Mapped[str] = mapped_column(String)
+    description: Mapped[str | None] = mapped_column(String)
+    instructor_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    instructor: Mapped["User"] = relationship(back_populates="classes_taught")
+    assignments: Mapped[list["Assignment"]] = relationship(
+        back_populates="course_class", cascade="all, delete-orphan"
+    )
+
+
+class Assignment(Base):
+    __tablename__ = "assignments"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    class_id: Mapped[str] = mapped_column(ForeignKey("classes.id"))
+    title: Mapped[str] = mapped_column(String)
+    description: Mapped[str | None] = mapped_column(String)
+    supervisor_email: Mapped[str | None] = mapped_column(String)
+    status: Mapped[ServiceType] = mapped_column(
+        SAEnum(ServiceType), default=ServiceType.ACTIVE
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    course_class: Mapped["CourseClass"] = relationship(back_populates="assignments")
+    groups: Mapped[list["ProjectGroup"]] = relationship(
+        back_populates="assignment", cascade="all, delete-orphan"
+    )
+    contribution_reports: Mapped[list["ContributionReport"]] = relationship(
+        back_populates="assignment", cascade="all, delete-orphan"
     )
 
 
@@ -258,11 +315,19 @@ class ProjectGroup(Base):
     doc_weight: Mapped[float | None] = mapped_column(Float)
     transcript_weight: Mapped[float | None] = mapped_column(Float)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    assignment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assignments.id"), nullable=True
+    )
+    group_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    report_status: Mapped[ReportStatus | None] = mapped_column(
+        SAEnum(ReportStatus), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     owner: Mapped["User"] = relationship(foreign_keys=[owner_id])
+    assignment: Mapped["Assignment | None"] = relationship(back_populates="groups")
     memberships: Mapped[list["GroupMembership"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
@@ -391,13 +456,28 @@ class ContributionReport(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    assignment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assignments.id"), nullable=True
+    )
+    status: Mapped[ContributionReportStatus] = mapped_column(
+        SAEnum(ContributionReportStatus),
+        default=ContributionReportStatus.PENDING,
+        server_default=text("'PENDING'"),
+        nullable=False,
+    )
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+    notification_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     final_calculated_scores: Mapped[dict | None] = mapped_column(JSON)
     html_detailed_summary_report: Mapped[str | None] = mapped_column(Text)
 
     group: Mapped["ProjectGroup"] = relationship(back_populates="contribution_reports")
+    assignment: Mapped["Assignment | None"] = relationship(
+        back_populates="contribution_reports"
+    )
 
 
 class PasswordResetToken(Base):

@@ -47,6 +47,10 @@ async def process_meeting_session(meeting_id: str, group_id: str) -> None:
 
             await _process_session(session, group_id, db)
             await db.commit()
+
+            from app.services.contribution_report import check_and_finalize_report
+
+            await check_and_finalize_report(group_id)
         except Exception as exc:
             await db.rollback()
             failed = await db.scalar(
@@ -57,6 +61,10 @@ async def process_meeting_session(meeting_id: str, group_id: str) -> None:
                 failed.error_message = str(exc)
                 db.add(failed)
                 await db.commit()
+
+                from app.services.contribution_report import check_and_finalize_report
+
+                await check_and_finalize_report(group_id)
 
 
 async def _process_session(
@@ -135,13 +143,24 @@ async def _process_session(
             )
         )
 
-    await recalculate_group_engagement(group_id, db)
+    # #region agent log
+    import json as _json, time as _time
+    with open("/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-ab9586.log", "a") as _f:
+        _f.write(_json.dumps({"sessionId":"ab9586","hypothesisId":"H1","location":"meeting_processor.py:before_recalculate","message":"session status before engagement recalc","data":{"session_id":session.id,"session_status":session.status.value,"metrics_count":len(metrics_by_user),"group_id":group_id},"timestamp":int(_time.time()*1000)}) + "\n")
+    # #endregion
 
     session.status = MeetingSessionStatus.COMPLETED
     session.processed_at = datetime.now(timezone.utc)
     session.error_message = None
     session.unmapped_names = None
     db.add(session)
+
+    await recalculate_group_engagement(group_id, db)
+
+    # #region agent log
+    with open("/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-ab9586.log", "a") as _f:
+        _f.write(_json.dumps({"sessionId":"ab9586","hypothesisId":"H1","location":"meeting_processor.py:after_recalculate","message":"session marked completed then recalculated","data":{"session_id":session.id,"session_status":session.status.value,"metrics_count":len(metrics_by_user)},"timestamp":int(_time.time()*1000),"runId":"post-fix"}) + "\n")
+    # #endregion
 
 
 def _read_file(object_key: str) -> str:

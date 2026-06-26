@@ -100,18 +100,19 @@ async def create_group(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a group. Students and instructors become the group owner."""
-    if current_user.role not in (RoleType.STUDENT, RoleType.INSTRUCTOR):
+    """Create a group. Students become the group owner; instructors use class/assignment reports."""
+    if current_user.role == RoleType.INSTRUCTOR:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only students or instructors can create groups.",
+            detail="Instructors should create reports through classes and assignments.",
+        )
+    if current_user.role != RoleType.STUDENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only students can create standalone groups.",
         )
 
-    membership_role = (
-        GroupMemberRole.INSTRUCTOR
-        if current_user.role == RoleType.INSTRUCTOR
-        else GroupMemberRole.STUDENT
-    )
+    membership_role = GroupMemberRole.STUDENT
 
     group = ProjectGroup(
         group_name=payload.group_name,
