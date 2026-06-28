@@ -90,3 +90,19 @@ def parse_dataset_csv(file: BinaryIO) -> tuple[list[CollabTrackDataset], int]:
         )
 
     return records, skipped
+
+
+def serialize_dataset_csv(records: list[CollabTrackDataset]) -> str:
+    """Serialize dataset rows to CSV matching the upload/import format."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=REQUIRED_COLUMNS,
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    for record in records:
+        writer.writerow(
+            {column: getattr(record, column) for column in REQUIRED_COLUMNS}
+        )
+    return buffer.getvalue()

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,7 +8,7 @@ from app.dependencies import get_current_admin
 from app.models import CollabTrackDataset
 from app.schemas.dataset import CollabTrackDatasetOut, DatasetUploadResult
 from app.schemas.response import ApiResponse, success
-from app.services.dataset import parse_dataset_csv
+from app.services.dataset import parse_dataset_csv, serialize_dataset_csv
 
 router = APIRouter(
     prefix="/collab-track-dataset",
@@ -32,6 +33,34 @@ async def list_dataset_records(db: AsyncSession = Depends(get_db)):
     return success(
         data=records,
         message="Dataset records retrieved successfully.",
+    )
+
+
+@router.get(
+    "/export",
+    summary="Export collab track dataset as CSV",
+    responses={
+        200: {
+            "content": {"text/csv": {}},
+            "description": "CSV file download.",
+        },
+    },
+)
+async def export_dataset_csv(db: AsyncSession = Depends(get_db)):
+    """Download every row in `collab_track_dataset` as a CSV file."""
+    result = await db.scalars(
+        select(CollabTrackDataset).order_by(
+            CollabTrackDataset.group_id.asc(),
+            CollabTrackDataset.student_id.asc(),
+        )
+    )
+    content = serialize_dataset_csv(list(result.all()))
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="collab_tracker_dataset.csv"',
+        },
     )
 
 
