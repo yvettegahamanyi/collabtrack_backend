@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.database import get_db
 from app.dependencies import get_current_instructor
@@ -199,7 +200,7 @@ async def create_report(
 
     form = await request.form()
     attendance = form.get("attendance_file")
-    if not isinstance(attendance, UploadFile):
+    if not isinstance(attendance, StarletteUploadFile):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="attendance_file is required.",
@@ -222,12 +223,12 @@ async def create_report(
         google_raw if isinstance(google_raw, str) else None
     )
 
-    meeting_files: list[tuple[UploadFile, UploadFile, UploadFile]] = []
+    meeting_files: list[tuple[StarletteUploadFile, StarletteUploadFile, StarletteUploadFile]] = []
     for index in range(len(meetings_meta)):
         att = form.get(f"meeting_{index}_attendance")
         trans = form.get(f"meeting_{index}_transcript")
         chat = form.get(f"meeting_{index}_chat")
-        if not isinstance(att, UploadFile) or not isinstance(trans, UploadFile) or not isinstance(chat, UploadFile):
+        if not isinstance(att, StarletteUploadFile) or not isinstance(trans, StarletteUploadFile) or not isinstance(chat, StarletteUploadFile):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Meeting {index + 1} requires attendance, transcript, and chat files.",

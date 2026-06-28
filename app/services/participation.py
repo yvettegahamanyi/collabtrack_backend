@@ -1,5 +1,6 @@
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
@@ -63,6 +64,32 @@ _SUBSTRING_IDENTIFIER_SCORE = 70
 _MIN_SUBSTRING_LENGTH = 6
 
 
+@dataclass
+class PlatformIdentity:
+    github_email: str | None = None
+    google_docs_email: str | None = None
+    google_meet_email: str | None = None
+
+
+def _register_platform_email_aliases(
+    *,
+    identity: PlatformIdentity | None,
+    canonical_email: str,
+    email_canonical: dict[str, str],
+) -> None:
+    """Map every known platform email for a member to their docs signup email."""
+    email_canonical[canonical_email] = canonical_email
+    if not identity:
+        return
+    for alias in (
+        identity.github_email,
+        identity.google_docs_email,
+        identity.google_meet_email,
+    ):
+        if alias:
+            email_canonical[alias.lower()] = canonical_email
+
+
 def _score_github_login_for_user(
     login: str,
     *,
@@ -109,6 +136,8 @@ def _assign_github_metrics(
     member_list: list[GroupMembership],
     integrations_by_user: dict[str, dict[str, UserIntegration | None]],
     github_result: GithubSyncResult,
+    *,
+    platform_identities: dict[str, PlatformIdentity] | None = None,
 ) -> dict[str, GithubMetrics]:
     candidates: list[tuple[int, str, str]] = []
 
@@ -122,9 +151,14 @@ def _assign_github_metrics(
                     (_OAUTH_LOGIN_SCORE, user.id, oauth_login)
                 )
 
-        email = user.email.lower()
-        if email in github_result.by_email:
-            candidates.append((_EXACT_EMAIL_SCORE, user.id, f"email:{email}"))
+        identity = (platform_identities or {}).get(user.id)
+        github_email = (
+            identity.github_email.lower()
+            if identity and identity.github_email
+            else user.email.lower()
+        )
+        if github_email in github_result.by_email:
+            candidates.append((_EXACT_EMAIL_SCORE, user.id, f"email:{github_email}"))
 
         for login in github_result.by_login:
             score = _score_github_login_for_user(
@@ -202,6 +236,19 @@ async def link_github_repo(
     repo: str,
     db: AsyncSession,
 ) -> GroupGithubRepo:
+    existing = await db.scalar(
+        select(GroupGithubRepo).where(
+            GroupGithubRepo.group_id == group.id,
+            GroupGithubRepo.owner == owner,
+            GroupGithubRepo.repo == repo,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Repository {owner}/{repo} is already linked to this group.",
+        )
+
     access_token = await _find_github_token_for_group(group, db)
     default_branch = None
     if access_token:
@@ -234,6 +281,18 @@ async def link_google_doc(
     file_id: str,
     db: AsyncSession,
 ) -> GroupGoogleDoc:
+    existing = await db.scalar(
+        select(GroupGoogleDoc).where(
+            GroupGoogleDoc.group_id == group.id,
+            GroupGoogleDoc.file_id == file_id,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This Google Doc is already linked to this group.",
+        )
+
     title = "Untitled Document"
     token = await _find_google_token_for_group(group, db)
     if token:
@@ -251,7 +310,10 @@ async def link_google_doc(
 
 
 async def sync_group_participation(
-    group: ProjectGroup, db: AsyncSession
+    group: ProjectGroup,
+    db: AsyncSession,
+    *,
+    platform_identities: dict[str, PlatformIdentity] | None = None,
 ) -> SyncOut:
     await _enforce_sync_rate_limit(group, db)
 
@@ -283,17 +345,32 @@ async def sync_group_participation(
             db, user.id, IntegrationProvider.google
         )
         integrations_by_user[user.id] = {"github": gh, "google": goog}
-        signup = user.email.lower()
+        identity = (platform_identities or {}).get(user.id)
+        signup = (
+            identity.google_docs_email.lower()
+            if identity and identity.google_docs_email
+            else user.email.lower()
+        )
         signup_emails.add(signup)
-        email_canonical[signup] = signup
-        if gh and gh.provider_login:
+        _register_platform_email_aliases(
+            identity=identity,
+            canonical_email=signup,
+            email_canonical=email_canonical,
+        )
+        if gh and gh.provider_login and not identity:
             github_logins[user.id] = gh.provider_login
+        elif identity and identity.github_email:
+            github_emails[user.id] = identity.github_email.lower()
         else:
             github_emails[user.id] = signup
-        if goog and goog.provider_email:
+        if goog and goog.provider_email and not identity:
             oauth_email = goog.provider_email.lower()
             google_emails[user.id] = oauth_email
             email_canonical[oauth_email] = signup
+        elif identity and identity.google_docs_email:
+            docs_email = identity.google_docs_email.lower()
+            google_emails[user.id] = docs_email
+            email_canonical[docs_email] = signup
         else:
             google_emails[user.id] = signup
 
@@ -339,15 +416,24 @@ async def sync_group_participation(
             "so version history can be read."
         )
     if google_tokens and signup_emails:
-        name_to_email = {
-            " ".join(membership.user.name.strip().lower().split()): membership.user.email.lower()
-            for membership in member_list
-        }
+        name_to_email = {}
+        for membership in member_list:
+            identity = (platform_identities or {}).get(membership.user.id)
+            if identity and identity.google_docs_email:
+                lookup = identity.google_docs_email.lower()
+            else:
+                lookup = membership.user.email.lower()
+            if membership.user.name:
+                name_to_email[
+                    " ".join(membership.user.name.strip().lower().split())
+                ] = lookup
         for doc in doc_list:
             doc_synced = False
             last_status = None
             best_result: GoogleSyncResult | None = None
+            best_status = None
             best_score = -1
+            best_matched_count = -1
             activity_scope_available = False
             people_lookup_scope_available = False
             for provider_email, token in google_tokens:
@@ -368,15 +454,27 @@ async def sync_group_participation(
                     metrics.edits + metrics.comments
                     for metrics in doc_result.by_email.values()
                 )
+                matched_count = len(doc_result.by_email)
                 if (
                     doc_status.revisions_status != 200
                     and doc_status.activity_status != 200
                 ):
                     continue
                 doc_synced = True
-                if match_score > best_score:
+                prefer_token = match_score > best_score or (
+                    match_score == best_score
+                    and matched_count > best_matched_count
+                ) or (
+                    match_score == best_score
+                    and matched_count == best_matched_count
+                    and doc_status.people_lookup_scope_granted
+                    and (best_status is None or not best_status.people_lookup_scope_granted)
+                )
+                if prefer_token:
                     best_result = doc_result
+                    best_status = doc_status
                     best_score = match_score
+                    best_matched_count = matched_count
 
             if best_result is not None:
                 merge_google_results(google_result, best_result)
@@ -397,19 +495,37 @@ async def sync_group_participation(
                     "need to connect Google or be individually shared on the doc."
                 )
 
+            status_for_warnings = best_status or last_status
             if (
-                last_status is not None
-                and last_status.activity_status == 200
-                and last_status.activity_edit_count > last_status.revision_count
-                and last_status.activity_source == "revisions"
-                and not last_status.matched_emails
+                status_for_warnings is not None
+                and status_for_warnings.activity_status == 200
+                and status_for_warnings.activity_edit_count > status_for_warnings.revision_count
+                and status_for_warnings.activity_source == "revisions"
+                and not status_for_warnings.matched_emails
             ):
                 sync_warnings.append(
-                    f'Found {last_status.activity_edit_count} edit events in Drive '
+                    f'Found {status_for_warnings.activity_edit_count} edit events in Drive '
                     f'Activity for "{doc.title}", but could not match authors to '
                     "group members. Reconnect Google and ensure collaborators use "
                     "their school emails on the document."
                 )
+            if (
+                best_result is not None
+                and best_status is not None
+                and best_status.activity_status == 200
+                and best_status.activity_edit_count > 0
+            ):
+                matched_edits = sum(
+                    metrics.edits for metrics in best_result.by_email.values()
+                )
+                if matched_edits < best_status.activity_edit_count:
+                    sync_warnings.append(
+                        f'Only {matched_edits} of {best_status.activity_edit_count} '
+                        f'doc edits for "{doc.title}" were matched to group members. '
+                        "Reconnect Google (Disconnect → Connect) with directory access, "
+                        "then re-collect. Ensure each student’s google_docs_email in the "
+                        "identity CSV matches the email they use on the document."
+                    )
 
             if not doc_synced and last_status is not None:
                 sync_warnings.append(
@@ -421,18 +537,26 @@ async def sync_group_participation(
     members_synced = 0
 
     github_metrics_by_user = _assign_github_metrics(
-        member_list, integrations_by_user, github_result
+        member_list,
+        integrations_by_user,
+        github_result,
+        platform_identities=platform_identities,
     )
 
     for membership in member_list:
         user = membership.user
+        identity = (platform_identities or {}).get(user.id)
 
         metrics: dict = {}
         gh_metrics = github_metrics_by_user.get(user.id)
         if gh_metrics is not None:
             metrics["github"] = gh_metrics.model_dump()
 
-        lookup_email = user.email.lower()
+        lookup_email = (
+            identity.google_docs_email.lower()
+            if identity and identity.google_docs_email
+            else user.email.lower()
+        )
         g_metrics = google_result.by_email.get(lookup_email)
         g_events = google_result.events_by_email.get(lookup_email, [])
         if g_metrics:
@@ -593,12 +717,18 @@ async def get_member_participation(
 async def _find_github_token_for_group(
     group: ProjectGroup, db: AsyncSession
 ) -> str | None:
+    user_ids: list[str] = [group.owner_id]
     memberships = await db.scalars(
         select(GroupMembership).where(GroupMembership.group_id == group.id)
     )
-    for membership in memberships.all():
+    user_ids.extend(membership.user_id for membership in memberships.all())
+    seen: set[str] = set()
+    for user_id in user_ids:
+        if user_id in seen:
+            continue
+        seen.add(user_id)
         integration = await get_user_integration(
-            db, membership.user_id, IntegrationProvider.github
+            db, user_id, IntegrationProvider.github
         )
         if integration:
             try:
@@ -612,14 +742,20 @@ async def _find_google_tokens_for_group(
     group: ProjectGroup, db: AsyncSession
 ) -> list[tuple[str, str]]:
     """Return (provider_email, access_token) for each member with Google connected."""
+    user_ids: list[str] = [group.owner_id]
     memberships = await db.scalars(
         select(GroupMembership).where(GroupMembership.group_id == group.id)
     )
+    user_ids.extend(membership.user_id for membership in memberships.all())
     tokens: list[tuple[str, str]] = []
     seen_emails: set[str] = set()
-    for membership in memberships.all():
+    seen_users: set[str] = set()
+    for user_id in user_ids:
+        if user_id in seen_users:
+            continue
+        seen_users.add(user_id)
         integration = await get_user_integration(
-            db, membership.user_id, IntegrationProvider.google
+            db, user_id, IntegrationProvider.google
         )
         if integration is None:
             continue

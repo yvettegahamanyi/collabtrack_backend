@@ -372,6 +372,9 @@ async def _build_directory_person_map_from_members(
     for email in signup_emails:
         queries.add(email)
         queries.add(email.split("@", 1)[0])
+    for alias in email_canonical:
+        queries.add(alias)
+        queries.add(alias.split("@", 1)[0])
     if author_lookup:
         for key in author_lookup:
             if " " in key or "." in key:

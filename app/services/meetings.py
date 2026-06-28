@@ -130,7 +130,7 @@ async def upload_meeting_files(
     *,
     attendance_file: UploadFile,
     transcript_file: UploadFile,
-    chat_file: UploadFile,
+    chat_file: UploadFile | None = None,
     user: User,
     db: AsyncSession,
 ) -> MeetingSessionOut:
@@ -145,11 +145,12 @@ async def upload_meeting_files(
             detail="Cannot upload files while the session is being processed.",
         )
 
-    uploads = [
+    uploads: list[tuple[UploadFile, MeetingFileType, str]] = [
         (attendance_file, MeetingFileType.ATTENDANCE, ".csv"),
         (transcript_file, MeetingFileType.TRANSCRIPT, ".txt"),
-        (chat_file, MeetingFileType.CHAT, ".txt"),
     ]
+    if chat_file is not None and (chat_file.filename or "").strip():
+        uploads.append((chat_file, MeetingFileType.CHAT, ".txt"))
 
     for upload, _file_type, expected_ext in uploads:
         filename = upload.filename or ""

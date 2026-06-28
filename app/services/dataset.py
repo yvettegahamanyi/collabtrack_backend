@@ -9,8 +9,7 @@ from app.models import CollabTrackDataset
 REQUIRED_COLUMNS = [
     "student_id",
     "group_id",
-    "assignment_type",
-    "commit_consistency",
+    "code_commits",
     "code_share",
     "review_participation",
     "attendance_ratio",
@@ -22,7 +21,7 @@ REQUIRED_COLUMNS = [
 ]
 
 FLOAT_COLUMNS = [
-    "commit_consistency",
+    "code_commits",
     "code_share",
     "review_participation",
     "attendance_ratio",

@@ -27,12 +27,6 @@ async def recalculate_group_engagement(
     completed_sessions = list(sessions.all())
     total_sessions = len(completed_sessions)
 
-    # #region agent log
-    import json as _json, time as _time
-    with open("/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-ab9586.log", "a") as _f:
-        _f.write(_json.dumps({"sessionId":"ab9586","hypothesisId":"H1","location":"engagement_calculator.py:recalculate","message":"completed sessions found for engagement","data":{"group_id":group_id,"total_sessions":total_sessions,"session_ids":[s.id for s in completed_sessions]},"timestamp":int(_time.time()*1000)}) + "\n")
-    # #endregion
-
     memberships = await db.scalars(
         select(GroupMembership)
         .where(
@@ -127,12 +121,6 @@ async def recalculate_group_engagement(
         score.sessions_attended = sessions_attended
         score.total_sessions = total_sessions
         score.last_updated = now
-
-        # #region agent log
-        if user_id == student_members[0].user_id:
-            with open("/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-ab9586.log", "a") as _f:
-                _f.write(_json.dumps({"sessionId":"ab9586","hypothesisId":"H1","location":"engagement_calculator.py:score_update","message":"first student engagement score computed","data":{"user_id":user_id,"attendance_ratio":score.attendance_ratio,"speaking_ratio":score.speaking_ratio,"chat_participation":score.chat_participation,"sessions_attended":score.sessions_attended,"total_sessions":score.total_sessions},"timestamp":int(_time.time()*1000)}) + "\n")
-        # #endregion
 
     stale_user_ids = set(score_by_user.keys()) - seen_user_ids
     if stale_user_ids:

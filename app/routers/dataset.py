@@ -52,11 +52,10 @@ async def upload_dataset_csv(
 ):
     """Import rows from a CSV file into `collab_track_dataset`.
 
-    Expected columns: `student_id`, `group_id`, `assignment_type`,
-    `commit_consistency`, `code_share`, `review_participation`,
-    `attendance_ratio`, `speaking_participation_ratio`,
-    `chat_participation_ratio`, `docs_contribution_share`,
-    `comment_activity`, `benchmark_score`.
+    Expected columns: `student_id`, `group_id`, `code_commits`, `code_share`,
+    `review_participation`, `attendance_ratio`, `speaking_participation_ratio`,
+    `chat_participation_ratio`, `docs_contribution_share`, `comment_activity`,
+    `benchmark_score`.
     """
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(

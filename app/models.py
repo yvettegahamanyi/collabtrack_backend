@@ -611,14 +611,22 @@ class EngagementScore(Base):
     user: Mapped["User"] = relationship()
 
 
+class TrainingCollectionStatus(str, enum.Enum):
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
 class CollabTrackDataset(Base):
     __tablename__ = "collab_track_dataset"
+    __table_args__ = (
+        UniqueConstraint("group_id", "student_id", name="uq_collab_track_dataset_group_student"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     student_id: Mapped[str] = mapped_column(String, index=True)
     group_id: Mapped[str] = mapped_column(String, index=True)
-    assignment_type: Mapped[str] = mapped_column(String)
-    commit_consistency: Mapped[float] = mapped_column(Float)
+    code_commits: Mapped[float] = mapped_column(Float)
     code_share: Mapped[float] = mapped_column(Float)
     review_participation: Mapped[float] = mapped_column(Float)
     attendance_ratio: Mapped[float] = mapped_column(Float)
@@ -630,3 +638,51 @@ class CollabTrackDataset(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class TrainingCollection(Base):
+    __tablename__ = "training_collections"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    project_group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    dataset_group_id: Mapped[str] = mapped_column(String, index=True)
+    created_by_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[TrainingCollectionStatus] = mapped_column(
+        SAEnum(TrainingCollectionStatus),
+        default=TrainingCollectionStatus.PROCESSING,
+        server_default=text("'PROCESSING'"),
+        nullable=False,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    project_group: Mapped["ProjectGroup"] = relationship()
+    created_by: Mapped["User"] = relationship(foreign_keys=[created_by_user_id])
+    members: Mapped[list["TrainingCollectionMember"]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
+
+
+class TrainingCollectionMember(Base):
+    __tablename__ = "training_collection_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "collection_id", "dataset_student_id", name="uq_training_member_student_id"
+        ),
+        UniqueConstraint("collection_id", "user_id", name="uq_training_member_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    collection_id: Mapped[str] = mapped_column(ForeignKey("training_collections.id"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    dataset_student_id: Mapped[str] = mapped_column(String)
+    display_name: Mapped[str] = mapped_column(String)
+    github_email: Mapped[str | None] = mapped_column(String)
+    google_docs_email: Mapped[str | None] = mapped_column(String)
+    google_meet_email: Mapped[str | None] = mapped_column(String)
+
+    collection: Mapped["TrainingCollection"] = relationship(back_populates="members")
+    user: Mapped["User"] = relationship()

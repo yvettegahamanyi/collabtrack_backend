@@ -16,7 +16,7 @@ DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 # Import models so they are registered on Base.metadata.
 from app import models  # noqa: F401
 from app.database import engine
-from app.routers import admin, assignments, auth, classes, dataset, groups, integrations, invites, users
+from app.routers import admin, assignments, auth, classes, dataset, groups, integrations, invites, training, users
 
 
 @asynccontextmanager
@@ -80,6 +80,10 @@ tags_metadata = [
     {
         "name": "dataset",
         "description": "Collab track benchmark dataset import and retrieval.",
+    },
+    {
+        "name": "training",
+        "description": "Training data collection engine for benchmark dataset building.",
     },
     {
         "name": "integrations",
@@ -173,6 +177,7 @@ app.include_router(admin.router)
 app.include_router(groups.router)
 app.include_router(invites.router)
 app.include_router(dataset.router)
+app.include_router(training.router)
 app.include_router(integrations.router)
 app.include_router(classes.router)
 app.include_router(assignments.router)

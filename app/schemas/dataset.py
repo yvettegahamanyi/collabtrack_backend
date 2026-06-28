@@ -9,8 +9,7 @@ class CollabTrackDatasetOut(BaseModel):
     id: str
     student_id: str
     group_id: str
-    assignment_type: str
-    commit_consistency: float
+    code_commits: float
     code_share: float
     review_participation: float
     attendance_ratio: float

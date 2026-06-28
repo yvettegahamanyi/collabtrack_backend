@@ -13,6 +13,8 @@ from app.models import (
     MeetingRawMetric,
     MeetingSession,
     MeetingSessionStatus,
+    TrainingCollection,
+    TrainingCollectionMember,
 )
 from app.services.engagement_calculator import recalculate_group_engagement
 from app.services.meeting_parser import (
@@ -74,12 +76,11 @@ async def _process_session(
     required = (
         MeetingFileType.ATTENDANCE,
         MeetingFileType.TRANSCRIPT,
-        MeetingFileType.CHAT,
     )
     missing = [file_type for file_type in required if file_type not in files_by_type]
     if missing:
         session.status = MeetingSessionStatus.FAILED
-        session.error_message = "All three meeting files must be uploaded before processing."
+        session.error_message = "Attendance and transcript files must be uploaded before processing."
         db.add(session)
         return
 
@@ -90,13 +91,19 @@ async def _process_session(
         transcript_content = _read_file(
             files_by_type[MeetingFileType.TRANSCRIPT].storage_path
         )
-        chat_content = _read_file(
-            files_by_type[MeetingFileType.CHAT].storage_path
-        )
+        chat_content = ""
+        if MeetingFileType.CHAT in files_by_type:
+            chat_content = _read_file(
+                files_by_type[MeetingFileType.CHAT].storage_path
+            )
 
         attendance = parse_attendance_csv(attendance_content)
         speaking = parse_transcript_or_chat(transcript_content, label="Transcript")
-        chat = parse_transcript_or_chat(chat_content, label="Chat")
+        chat = (
+            parse_transcript_or_chat(chat_content, label="Chat")
+            if chat_content.strip()
+            else {}
+        )
     except MeetingParseError as exc:
         session.status = MeetingSessionStatus.FAILED
         session.error_message = str(exc)
@@ -143,28 +150,42 @@ async def _process_session(
             )
         )
 
-    # #region agent log
-    import json as _json, time as _time
-    with open("/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-ab9586.log", "a") as _f:
-        _f.write(_json.dumps({"sessionId":"ab9586","hypothesisId":"H1","location":"meeting_processor.py:before_recalculate","message":"session status before engagement recalc","data":{"session_id":session.id,"session_status":session.status.value,"metrics_count":len(metrics_by_user),"group_id":group_id},"timestamp":int(_time.time()*1000)}) + "\n")
-    # #endregion
-
     session.status = MeetingSessionStatus.COMPLETED
     session.processed_at = datetime.now(timezone.utc)
     session.error_message = None
     session.unmapped_names = None
     db.add(session)
 
-    await recalculate_group_engagement(group_id, db)
+    await db.flush()
 
-    # #region agent log
-    with open("/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-ab9586.log", "a") as _f:
-        _f.write(_json.dumps({"sessionId":"ab9586","hypothesisId":"H1","location":"meeting_processor.py:after_recalculate","message":"session marked completed then recalculated","data":{"session_id":session.id,"session_status":session.status.value,"metrics_count":len(metrics_by_user)},"timestamp":int(_time.time()*1000),"runId":"post-fix"}) + "\n")
-    # #endregion
+    await recalculate_group_engagement(group_id, db)
 
 
 def _read_file(object_key: str) -> str:
     return download_file(object_key).decode("utf-8")
+
+
+async def _training_meet_email_map(
+    group_id: str, db: AsyncSession
+) -> dict[str, str]:
+    collection = await db.scalar(
+        select(TrainingCollection).where(
+            TrainingCollection.project_group_id == group_id
+        )
+    )
+    if collection is None:
+        return {}
+
+    members = await db.scalars(
+        select(TrainingCollectionMember).where(
+            TrainingCollectionMember.collection_id == collection.id
+        )
+    )
+    mapping: dict[str, str] = {}
+    for member in members.all():
+        if member.google_meet_email:
+            mapping[member.google_meet_email.lower()] = member.user_id
+    return mapping
 
 
 async def _resolve_names(
@@ -191,6 +212,9 @@ async def _resolve_names(
     for membership in memberships.all():
         user = membership.user
         user_id_by_email[user.email.lower()] = user.id
+
+    training_meet_emails = await _training_meet_email_map(group_id, db)
+    user_id_by_email.update(training_meet_emails)
 
     attendance = attendance or {}
     attendance_names = set(attendance.keys())
