@@ -2,25 +2,55 @@ import asyncio
 import logging
 import os
 import smtplib
+from dataclasses import dataclass
 from email.message import EmailMessage
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_BACKEND_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
 
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "noreply@collabtrack.com")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 
+@dataclass(frozen=True)
+class SmtpConfig:
+    host: str
+    port: int
+    user: str
+    password: str
+    from_email: str
+
+
+def _load_smtp_config() -> SmtpConfig:
+    load_dotenv(_BACKEND_ROOT / ".env", override=True)
+    host = os.getenv("SMTP_HOST", "").strip()
+    port = int(os.getenv("SMTP_PORT", "587"))
+    user = os.getenv("SMTP_USER", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "").replace(" ", "").strip()
+    configured_from = os.getenv("SMTP_FROM_EMAIL", "").strip()
+    default_from = "noreply@collabtrack.com"
+    if not configured_from or configured_from == default_from:
+        from_email = user or default_from
+    else:
+        from_email = configured_from
+    return SmtpConfig(
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        from_email=from_email,
+    )
+
+
 def _send_email_sync(*, to_email: str, subject: str, body: str) -> None:
-    if not SMTP_HOST:
+    smtp = _load_smtp_config()
+
+    if not smtp.host:
         logger.info(
             "SMTP not configured; email to %s\nSubject: %s\n%s",
             to_email,
@@ -29,16 +59,20 @@ def _send_email_sync(*, to_email: str, subject: str, body: str) -> None:
         )
         return
 
+    if not smtp.user or not smtp.password:
+        raise smtplib.SMTPException(
+            "SMTP credentials are missing. Set SMTP_USER and SMTP_PASSWORD in .env."
+        )
+
     message = EmailMessage()
-    message["From"] = SMTP_FROM_EMAIL
+    message["From"] = smtp.from_email
     message["To"] = to_email
     message["Subject"] = subject
     message.set_content(body)
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+    with smtplib.SMTP(smtp.host, smtp.port) as server:
         server.starttls()
-        if SMTP_USER and SMTP_PASSWORD:
-            server.login(SMTP_USER, SMTP_PASSWORD)
+        server.login(smtp.user, smtp.password)
         server.send_message(message)
 
 
@@ -51,7 +85,7 @@ async def send_email(*, to_email: str, subject: str, body: str) -> None:
     )
 
 
-async def send_supervisor_report_notification(
+async def send_report_ready_notification(
     *,
     to_email: str,
     assignment_title: str,
@@ -72,3 +106,20 @@ async def send_supervisor_report_notification(
         f"— CollabTrack"
     )
     await send_email(to_email=to_email, subject=subject, body=body)
+
+
+async def send_supervisor_report_notification(
+    *,
+    to_email: str,
+    assignment_title: str,
+    group_name: str,
+    assignment_id: str,
+    group_id: str,
+) -> None:
+    await send_report_ready_notification(
+        to_email=to_email,
+        assignment_title=assignment_title,
+        group_name=group_name,
+        assignment_id=assignment_id,
+        group_id=group_id,
+    )

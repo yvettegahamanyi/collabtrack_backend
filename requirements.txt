@@ -15,3 +15,6 @@ httpx
 cryptography
 boto3
 pydantic-settings
+joblib
+scikit-learn
+numpy

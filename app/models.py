@@ -322,6 +322,13 @@ class ProjectGroup(Base):
     report_status: Mapped[ReportStatus | None] = mapped_column(
         SAEnum(ReportStatus), nullable=True
     )
+    dataset_group_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    participation_scores_generated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    dataset_exported_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -361,6 +368,29 @@ class ProjectGroup(Base):
     engagement_scores: Mapped[list["EngagementScore"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
+    participation_scores: Mapped[list["MemberParticipationScore"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+
+class MemberParticipationScore(Base):
+    __tablename__ = "member_participation_scores"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_participation_score_group_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    predicted_score: Mapped[float] = mapped_column(Float)
+    contributor_tier: Mapped[str] = mapped_column(String)
+    features: Mapped[dict] = mapped_column(JSON, default=dict)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped["ProjectGroup"] = relationship(back_populates="participation_scores")
+    user: Mapped["User"] = relationship()
 
 
 class GroupMembership(Base):

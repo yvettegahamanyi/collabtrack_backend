@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.database import get_db
 from app.dependencies import get_current_instructor
-from app.models import Assignment, User
+from app.models import Assignment, ReportStatus, User
 from app.schemas.assignment import (
     AssignmentCreate,
     AssignmentDetailOut,
@@ -31,10 +31,13 @@ from app.services.contribution_report import resend_supervisor_notification
 from app.services.groups import get_group_or_404
 from app.services.meeting_parser import MeetingParseError, parse_attendance_members
 from app.services.participation import get_contributions
+from app.services.participation_scoring import try_generate_participation_scores_for_report
 from app.services.report_creation import (
-    create_assignment_report,
+    MeetingFilePayload,
+    bootstrap_assignment_report,
     parse_meetings_meta,
     parse_url_list,
+    process_assignment_report_meetings,
 )
 
 router = APIRouter(tags=["assignments"])
@@ -193,6 +196,7 @@ async def preview_attendance(
 async def create_report(
     assignment_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_instructor),
     db: AsyncSession = Depends(get_db),
 ):
@@ -223,8 +227,8 @@ async def create_report(
         google_raw if isinstance(google_raw, str) else None
     )
 
-    meeting_files: list[tuple[StarletteUploadFile, StarletteUploadFile, StarletteUploadFile]] = []
-    for index in range(len(meetings_meta)):
+    meeting_payloads: list[MeetingFilePayload] = []
+    for index, meta in enumerate(meetings_meta):
         att = form.get(f"meeting_{index}_attendance")
         trans = form.get(f"meeting_{index}_transcript")
         chat = form.get(f"meeting_{index}_chat")
@@ -233,21 +237,39 @@ async def create_report(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Meeting {index + 1} requires attendance, transcript, and chat files.",
             )
-        meeting_files.append((att, trans, chat))
+        meeting_payloads.append(
+            MeetingFilePayload(
+                meta=meta,
+                attendance=await att.read(),
+                transcript=await trans.read(),
+                chat=await chat.read(),
+                attendance_filename=att.filename or f"meeting_{index}_attendance.csv",
+                transcript_filename=trans.filename or f"meeting_{index}_transcript.txt",
+                chat_filename=chat.filename or f"meeting_{index}_chat.txt",
+            )
+        )
 
-    result = await create_assignment_report(
+    attendance_content = await attendance.read()
+    group, result = await bootstrap_assignment_report(
         assignment_id=assignment_id,
         instructor=current_user,
-        attendance_file=attendance,
+        attendance_content=attendance_content,
         github_urls=github_list,
         google_doc_urls=google_list,
-        meetings_meta=meetings_meta,
-        meeting_files=meeting_files,
         db=db,
     )
+
+    background_tasks.add_task(
+        process_assignment_report_meetings,
+        group_id=group.id,
+        assignment_id=assignment_id,
+        instructor_id=current_user.id,
+        meetings=meeting_payloads,
+    )
+
     return success(
         data=result,
-        message="Report created successfully.",
+        message="Report created successfully. Processing in background.",
         code=status.HTTP_201_CREATED,
     )
 
@@ -288,6 +310,10 @@ async def get_report(
 
     contributions = None
     if group.report_status and group.report_status.value == "READY":
+        if group.participation_scores_generated_at is None:
+            await try_generate_participation_scores_for_report(group, db)
+            await db.commit()
+            await db.refresh(group)
         contributions = await get_contributions(group, db)
 
     return success(
@@ -315,4 +341,5 @@ async def notify_supervisor(
         raise HTTPException(status_code=404, detail="Report not found in this assignment.")
 
     await resend_supervisor_notification(group, assignment, db)
-    return success(data=None, message="Supervisor notification sent.")
+    await db.commit()
+    return success(data=None, message="Instructor notification sent.")

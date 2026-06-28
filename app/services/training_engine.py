@@ -27,6 +27,7 @@ from app.models import (
 from app.schemas.dataset import CollabTrackDatasetOut
 from app.schemas.report import MeetingInputMeta
 from app.schemas.training import IdentityMemberPreview, TrainingCollectionDetailOut
+from app.services.dataset import allocate_dataset_group_id
 from app.services.dataset_features import (
     build_group_activity_totals,
     compute_dataset_features,
@@ -151,12 +152,6 @@ def _normalize_email(value: object | None) -> str | None:
         return None
     email = str(value).strip().lower()
     return email or None
-
-
-async def allocate_dataset_group_id(db: AsyncSession) -> str:
-    rows = await db.scalars(select(CollabTrackDataset.group_id))
-    numeric_ids = [int(value) for value in rows.all() if value.isdigit()]
-    return str(max(numeric_ids, default=0) + 1)
 
 
 async def collect_training_data(

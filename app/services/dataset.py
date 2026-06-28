@@ -3,6 +3,8 @@ import io
 from typing import BinaryIO
 
 from fastapi import HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CollabTrackDataset
 
@@ -90,6 +92,12 @@ def parse_dataset_csv(file: BinaryIO) -> tuple[list[CollabTrackDataset], int]:
         )
 
     return records, skipped
+
+
+async def allocate_dataset_group_id(db: AsyncSession) -> str:
+    rows = await db.scalars(select(CollabTrackDataset.group_id))
+    numeric_ids = [int(value) for value in rows.all() if value.isdigit()]
+    return str(max(numeric_ids, default=0) + 1)
 
 
 def serialize_dataset_csv(records: list[CollabTrackDataset]) -> str:

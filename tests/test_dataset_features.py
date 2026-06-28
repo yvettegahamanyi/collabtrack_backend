@@ -9,6 +9,7 @@ from app.services.dataset_features import (
     build_group_activity_totals,
     compute_benchmark,
     compute_dataset_features,
+    compute_member_features_from_contributions,
     compute_rescaled_weights,
 )
 
@@ -232,3 +233,21 @@ def test_per_group_student_numbering():
 
     assert [row.student_id for row in rows] == ["1", "2"]
     assert all(row.group_id == "7" for row in rows)
+
+
+def test_compute_member_features_from_contributions():
+    contributions = ContributionsOut(
+        group_id="internal",
+        members=[
+            _member("u1", commits=2, lines=80, prs=1, edits=10, comments=2, attendance=1.0),
+            _member("u2", commits=2, lines=20, prs=1, edits=10, comments=2, attendance=0.5),
+        ],
+    )
+    rows = compute_member_features_from_contributions(contributions)
+    by_user = {row.user_id: row.features for row in rows}
+
+    assert by_user["u1"]["code_commits"] == 0.5
+    assert by_user["u1"]["code_share"] == 0.8
+    assert by_user["u1"]["attendance_ratio"] == 1.0
+    assert by_user["u2"]["code_share"] == 0.2
+    assert by_user["u2"]["speaking_participation_ratio"] == 0.0

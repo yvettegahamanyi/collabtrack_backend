@@ -14,8 +14,9 @@ from app.models import (
     ProjectGroup,
     ReportStatus,
 )
-from app.services.email import send_supervisor_report_notification
+from app.services.email import send_report_ready_notification
 from app.services.participation import get_contributions
+from app.services.participation_scoring import try_generate_participation_scores_for_report
 
 
 async def aggregate_and_save_report(
@@ -48,6 +49,52 @@ async def aggregate_and_save_report(
     group.report_status = ReportStatus.READY
     db.add(group)
     await db.flush()
+    return report
+
+
+async def _notify_instructor_report_ready(
+    group: ProjectGroup,
+    assignment: Assignment,
+    report: ContributionReport,
+    db: AsyncSession,
+) -> None:
+    if report.notification_sent_at is not None:
+        return
+
+    group_with_owner = await db.scalar(
+        select(ProjectGroup)
+        .where(ProjectGroup.id == group.id)
+        .options(selectinload(ProjectGroup.owner))
+    )
+    if group_with_owner is None or group_with_owner.owner is None:
+        return
+
+    instructor_email = group_with_owner.owner.email
+    if not instructor_email:
+        return
+
+    await send_report_ready_notification(
+        to_email=instructor_email,
+        assignment_title=assignment.title,
+        group_name=group.group_name or f"Group {group.group_number}",
+        assignment_id=assignment.id,
+        group_id=group.id,
+    )
+    report.notification_sent_at = datetime.now(timezone.utc)
+    db.add(report)
+
+
+async def finalize_ready_report(
+    group: ProjectGroup, assignment: Assignment, db: AsyncSession
+) -> ContributionReport:
+    report = await aggregate_and_save_report(group, assignment, db)
+    await try_generate_participation_scores_for_report(group, db)
+    await db.commit()
+    try:
+        await _notify_instructor_report_ready(group, assignment, report, db)
+        await db.commit()
+    except Exception:
+        await db.rollback()
     return report
 
 
@@ -115,26 +162,7 @@ async def check_and_finalize_report(group_id: str) -> None:
             return
 
         if statuses == {MeetingSessionStatus.COMPLETED}:
-            report = await aggregate_and_save_report(group, assignment, db)
-            await db.commit()
-
-            supervisor_email = (
-                assignment.supervisor_email or assignment.course_class.instructor.email
-            )
-            if supervisor_email and report.notification_sent_at is None:
-                try:
-                    await send_supervisor_report_notification(
-                        to_email=supervisor_email,
-                        assignment_title=assignment.title,
-                        group_name=group.group_name or f"Group {group.group_number}",
-                        assignment_id=assignment.id,
-                        group_id=group.id,
-                    )
-                    report.notification_sent_at = datetime.now(timezone.utc)
-                    db.add(report)
-                    await db.commit()
-                except Exception:
-                    await db.rollback()
+            await finalize_ready_report(group, assignment, db)
 
 
 async def resend_supervisor_notification(
@@ -148,26 +176,16 @@ async def resend_supervisor_notification(
     if assignment is None:
         return
 
-    supervisor_email = (
-        assignment.supervisor_email or assignment.course_class.instructor.email
-    )
-    if not supervisor_email:
-        return
-
-    await send_supervisor_report_notification(
-        to_email=supervisor_email,
-        assignment_title=assignment.title,
-        group_name=group.group_name or f"Group {group.group_number}",
-        assignment_id=assignment.id,
-        group_id=group.id,
-    )
-
     report = await db.scalar(
         select(ContributionReport)
         .where(ContributionReport.group_id == group.id)
         .order_by(ContributionReport.generated_at.desc())
         .limit(1)
     )
-    if report is not None:
-        report.notification_sent_at = datetime.now(timezone.utc)
-        db.add(report)
+    if report is None:
+        return
+
+    report.notification_sent_at = None
+    db.add(report)
+    await db.flush()
+    await _notify_instructor_report_ready(group, assignment, report, db)

@@ -45,6 +45,10 @@ from app.schemas.integration import (
     RepoOut,
 )
 from app.schemas.participation import ContributionsOut, MemberParticipationOut, SyncOut
+from app.schemas.participation_score import (
+    ParticipationScoreOut,
+    ParticipationScoresSummaryOut,
+)
 from app.services.group_members import (
     add_member_if_missing,
     require_instructor_can_manage_group,
@@ -66,6 +70,11 @@ from app.services.participation import (
     link_github_repo,
     link_google_doc,
     sync_group_participation,
+)
+from app.services.participation_scoring import (
+    generate_participation_scores,
+    get_member_participation_score,
+    get_participation_scores_for_group,
 )
 from app.schemas.meetings import (
     GroupEngagementReport,
@@ -728,4 +737,124 @@ async def get_group_engagement(
     return success(
         data=data,
         message="Engagement report retrieved successfully.",
+    )
+
+
+def _serialize_scores_summary(summary) -> ParticipationScoresSummaryOut:
+    return ParticipationScoresSummaryOut(
+        group_id=summary.group_id,
+        generated_at=summary.generated_at,
+        scores=[
+            ParticipationScoreOut(
+                user_id=score.user_id,
+                name=score.name,
+                predicted_score=score.predicted_score,
+                contributor_tier=score.contributor_tier,
+                features=score.features,
+                generated_at=score.generated_at,
+            )
+            for score in summary.scores
+        ],
+        warnings=summary.warnings,
+    )
+
+
+async def _viewer_can_manage_group(
+    group: ProjectGroup, user: User, db: AsyncSession
+) -> bool:
+    if group.owner_id == user.id:
+        return True
+    membership = await get_membership(group.id, user.id, db)
+    return membership is not None and membership.role == GroupMemberRole.INSTRUCTOR
+
+
+@router.post(
+    "/{group_id}/participation-scores/generate",
+    response_model=ApiResponse[ParticipationScoresSummaryOut],
+    summary="Generate ML participation scores for group members",
+    responses={
+        403: {"description": "Only owner or instructor can generate scores."},
+        409: {"description": "Scores already generated."},
+        422: {"description": "Participation not synced."},
+        503: {"description": "ML model unavailable."},
+    },
+)
+async def generate_group_participation_scores(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_owner_or_instructor(group, current_user, db)
+    summary = await generate_participation_scores(group, db)
+    await db.commit()
+    await db.refresh(group)
+    return success(
+        data=_serialize_scores_summary(summary),
+        message="Participation scores generated successfully.",
+    )
+
+
+@router.get(
+    "/{group_id}/participation-scores",
+    response_model=ApiResponse[ParticipationScoresSummaryOut],
+    summary="Get participation scores for group members",
+)
+async def get_group_participation_scores(
+    group_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    can_manage = await _viewer_can_manage_group(group, current_user, db)
+    summary = await get_participation_scores_for_group(
+        group,
+        db,
+        viewer_user_id=current_user.id,
+        viewer_is_manager=can_manage,
+    )
+    return success(
+        data=_serialize_scores_summary(summary),
+        message="Participation scores retrieved successfully.",
+    )
+
+
+@router.get(
+    "/{group_id}/members/{user_id}/participation-score",
+    response_model=ApiResponse[ParticipationScoreOut],
+    summary="Get ML participation score for one member",
+)
+async def get_member_participation_score_endpoint(
+    group_id: str,
+    user_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    group = await get_group_or_404(group_id, db)
+    await require_membership(group_id, current_user, db)
+    can_manage = await _viewer_can_manage_group(group, current_user, db)
+    if current_user.id != user_id and not can_manage:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only view your own participation score.",
+        )
+
+    score = await get_member_participation_score(group, user_id, db)
+    if score is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Participation score not found for this member.",
+        )
+
+    return success(
+        data=ParticipationScoreOut(
+            user_id=score.user_id,
+            name=score.name,
+            predicted_score=score.predicted_score,
+            contributor_tier=score.contributor_tier,
+            features=score.features,
+            generated_at=score.generated_at,
+        ),
+        message="Participation score retrieved successfully.",
     )
