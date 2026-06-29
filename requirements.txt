@@ -16,5 +16,5 @@ cryptography
 boto3
 pydantic-settings
 joblib
-scikit-learn
+scikit-learn==1.6.1
 numpy

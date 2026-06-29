@@ -75,6 +75,7 @@ from app.services.participation_scoring import (
     generate_participation_scores,
     get_member_participation_score,
     get_participation_scores_for_group,
+    maybe_regenerate_scores_after_sync,
 )
 from app.schemas.meetings import (
     GroupEngagementReport,
@@ -540,6 +541,23 @@ async def sync_group(
     group = await get_group_or_404(group_id, db)
     await require_owner_or_instructor(group, current_user, db)
     result = await sync_group_participation(group, db)
+    await db.commit()
+    await db.refresh(group)
+    scores_generated_before = group.participation_scores_generated_at
+    regen_warnings = await maybe_regenerate_scores_after_sync(group, db)
+    await db.refresh(group)
+    if group.participation_scores_generated_at != scores_generated_before:
+        from app.services.contribution_report import refresh_contribution_report_cache
+
+        await refresh_contribution_report_cache(group, db)
+    if regen_warnings:
+        result = SyncOut(
+            group_id=result.group_id,
+            synced_at=result.synced_at,
+            members_synced=result.members_synced,
+            warnings=[*result.warnings, *regen_warnings],
+        )
+    await db.commit()
     return success(
         data=result,
         message="Group participation data synced.",

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import (
     CollabTrackDataset,
+    GroupGithubRepo,
+    GroupGoogleDoc,
     GroupMemberRole,
     GroupMembership,
     MeetingRawMetric,
@@ -19,6 +23,40 @@ from app.models import (
     ParticipationSnapshot,
     ProjectGroup,
 )
+
+_DEBUG_LOG_PATH = (
+    "/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-2a07f5.log"
+)
+
+
+def _agent_debug_log(
+    *,
+    location: str,
+    message: str,
+    data: dict,
+    hypothesis_id: str,
+    run_id: str = "pre-fix",
+) -> None:
+    # #region agent log
+    try:
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as log_file:
+            log_file.write(
+                json.dumps(
+                    {
+                        "sessionId": "2a07f5",
+                        "runId": run_id,
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
 from app.services.benchmark_model import (
     BenchmarkModelUnavailableError,
     classify_contributor,
@@ -176,6 +214,161 @@ async def _require_synced_participation(group: ProjectGroup, db: AsyncSession) -
         )
 
 
+async def _latest_snapshot_sync_at(
+    group: ProjectGroup, db: AsyncSession
+) -> datetime | None:
+    synced_at = await db.scalar(
+        select(func.max(ParticipationSnapshot.synced_at)).where(
+            ParticipationSnapshot.group_id == group.id
+        )
+    )
+    return synced_at
+
+
+def _participation_scores_are_stale(
+    group: ProjectGroup, last_synced_at: datetime | None
+) -> bool:
+    if group.participation_scores_generated_at is None or last_synced_at is None:
+        return False
+    return group.participation_scores_generated_at < last_synced_at
+
+
+async def _clear_participation_scores(
+    group: ProjectGroup, db: AsyncSession
+) -> None:
+    await db.execute(
+        delete(MemberParticipationScore).where(
+            MemberParticipationScore.group_id == group.id
+        )
+    )
+    group.participation_scores_generated_at = None
+    db.add(group)
+    await db.flush()
+
+
+async def _snapshots_include_github(group: ProjectGroup, db: AsyncSession) -> bool:
+    repo_count = await db.scalar(
+        select(func.count())
+        .select_from(GroupGithubRepo)
+        .where(GroupGithubRepo.group_id == group.id)
+    )
+    if not repo_count:
+        return True
+
+    snapshots = await db.scalars(
+        select(ParticipationSnapshot).where(
+            ParticipationSnapshot.group_id == group.id
+        )
+    )
+    for snapshot in snapshots.all():
+        if snapshot.metrics and "github" in snapshot.metrics:
+            return True
+    return False
+
+
+async def _snapshots_include_google_docs(group: ProjectGroup, db: AsyncSession) -> bool:
+    doc_count = await db.scalar(
+        select(func.count())
+        .select_from(GroupGoogleDoc)
+        .where(GroupGoogleDoc.group_id == group.id)
+    )
+    if not doc_count:
+        return True
+
+    snapshots = await db.scalars(
+        select(ParticipationSnapshot).where(
+            ParticipationSnapshot.group_id == group.id
+        )
+    )
+    for snapshot in snapshots.all():
+        if snapshot.metrics and "google_docs" in snapshot.metrics:
+            return True
+    return False
+
+
+async def report_delivery_readiness(
+    group: ProjectGroup, db: AsyncSession
+) -> tuple[bool, list[str]]:
+    """True when linked integrations are synced and participation scores are current."""
+    blockers: list[str] = []
+    last_synced_at = await _latest_snapshot_sync_at(group, db)
+    if last_synced_at is None:
+        blockers.append("participation_not_synced")
+
+    if not await _snapshots_include_github(group, db):
+        blockers.append("github_not_synced")
+
+    if not await _snapshots_include_google_docs(group, db):
+        blockers.append("google_docs_not_synced")
+
+    if group.participation_scores_generated_at is None:
+        blockers.append("scores_not_generated")
+    elif _participation_scores_are_stale(group, last_synced_at):
+        blockers.append("scores_stale")
+
+    return len(blockers) == 0, blockers
+
+
+async def maybe_regenerate_scores_after_sync(
+    group: ProjectGroup,
+    db: AsyncSession,
+) -> list[str]:
+    """Regenerate scores when snapshots were synced after the last score run."""
+    warnings: list[str] = []
+    last_synced_at = await _latest_snapshot_sync_at(group, db)
+    is_stale = _participation_scores_are_stale(group, last_synced_at)
+
+    # #region agent log
+    _agent_debug_log(
+        location="participation_scoring.py:maybe_regenerate_scores_after_sync",
+        message="stale_check",
+        data={
+            "group_id": group.id,
+            "scores_generated_at": (
+                group.participation_scores_generated_at.isoformat()
+                if group.participation_scores_generated_at
+                else None
+            ),
+            "last_synced_at": (
+                last_synced_at.isoformat() if last_synced_at else None
+            ),
+            "is_stale": is_stale,
+        },
+        hypothesis_id="A",
+    )
+    # #endregion
+
+    if not is_stale:
+        return warnings
+
+    try:
+        summary = await generate_participation_scores(
+            group, db, allow_regenerate=True
+        )
+        from app.services.contribution_report import refresh_contribution_report_cache
+
+        await refresh_contribution_report_cache(group, db)
+        warnings.extend(summary.warnings)
+        # #region agent log
+        _agent_debug_log(
+            location="participation_scoring.py:maybe_regenerate_scores_after_sync",
+            message="regenerated_scores",
+            data={
+                "group_id": group.id,
+                "new_generated_at": summary.generated_at.isoformat(),
+                "score_count": len(summary.scores),
+            },
+            hypothesis_id="A",
+            run_id="post-fix",
+        )
+        # #endregion
+    except HTTPException as exc:
+        warnings.append(str(exc.detail))
+    except Exception:
+        warnings.append("Failed to regenerate participation scores after sync.")
+    return warnings
+
+
 def _ordered_student_memberships(
     memberships: list[GroupMembership],
 ) -> list[GroupMembership]:
@@ -277,6 +470,9 @@ async def generate_participation_scores(
                 detail="Participation scores have already been generated for this group.",
             )
 
+    if allow_regenerate and group.participation_scores_generated_at:
+        await _clear_participation_scores(group, db)
+
     await _require_synced_participation(group, db)
 
     warnings: list[str] = []
@@ -304,6 +500,32 @@ async def generate_participation_scores(
     rule_based_scores = await _rule_based_scores_by_user(
         group, contributions, student_user_ids, db
     )
+
+    last_synced_at = await _latest_snapshot_sync_at(group, db)
+    total_commits = sum(
+        float(row.features.get("code_commits", 0.0)) for row in feature_rows
+    )
+    # #region agent log
+    _agent_debug_log(
+        location="participation_scoring.py:generate_participation_scores",
+        message="score_generation_inputs",
+        data={
+            "group_id": group.id,
+            "allow_regenerate": allow_regenerate,
+            "scores_generated_at": (
+                group.participation_scores_generated_at.isoformat()
+                if group.participation_scores_generated_at
+                else None
+            ),
+            "last_synced_at": (
+                last_synced_at.isoformat() if last_synced_at else None
+            ),
+            "total_code_commits": total_commits,
+            "member_count": len(student_memberships),
+        },
+        hypothesis_id="B",
+    )
+    # #endregion
 
     generated_at = datetime.now(timezone.utc)
     score_results: list[ParticipationScoreResult] = []
@@ -445,8 +667,25 @@ async def try_generate_participation_scores_for_report(
         warnings.append(str(exc.detail))
         return warnings
 
+    if not await _snapshots_include_github(group, db):
+        warnings.append(
+            "GitHub data not yet synced; deferring participation score generation."
+        )
+        # #region agent log
+        _agent_debug_log(
+            location="participation_scoring.py:try_generate_participation_scores_for_report",
+            message="deferred_github_missing",
+            data={"group_id": group.id},
+            hypothesis_id="C",
+        )
+        # #endregion
+        return warnings
+
     try:
         await generate_participation_scores(group, db)
+        from app.services.contribution_report import refresh_contribution_report_cache
+
+        await refresh_contribution_report_cache(group, db)
     except HTTPException as exc:
         warnings.append(str(exc.detail))
     except Exception:

@@ -15,8 +15,29 @@ from app.models import (
     ReportStatus,
 )
 from app.services.email import send_report_ready_notification
-from app.services.participation import get_contributions
-from app.services.participation_scoring import try_generate_participation_scores_for_report
+from app.services.participation import get_contributions, sync_group_participation
+from app.services.participation_scoring import (
+    _agent_debug_log,
+    maybe_regenerate_scores_after_sync,
+    report_delivery_readiness,
+    try_generate_participation_scores_for_report,
+)
+
+
+async def refresh_contribution_report_cache(
+    group: ProjectGroup, db: AsyncSession
+) -> None:
+    report = await db.scalar(
+        select(ContributionReport)
+        .where(ContributionReport.group_id == group.id)
+        .order_by(ContributionReport.generated_at.desc())
+        .limit(1)
+    )
+    if report is None:
+        return
+    contributions = await get_contributions(group, db)
+    report.final_calculated_scores = contributions.model_dump(mode="json")
+    db.add(report)
 
 
 async def aggregate_and_save_report(
@@ -61,6 +82,18 @@ async def _notify_instructor_report_ready(
     if report.notification_sent_at is not None:
         return
 
+    ready, blockers = await report_delivery_readiness(group, db)
+    if not ready:
+        # #region agent log
+        _agent_debug_log(
+            location="contribution_report.py:_notify_instructor_report_ready",
+            message="email_deferred",
+            data={"group_id": group.id, "blockers": blockers},
+            hypothesis_id="F",
+        )
+        # #endregion
+        return
+
     group_with_owner = await db.scalar(
         select(ProjectGroup)
         .where(ProjectGroup.id == group.id)
@@ -72,6 +105,23 @@ async def _notify_instructor_report_ready(
     instructor_email = group_with_owner.owner.email
     if not instructor_email:
         return
+
+    # #region agent log
+    _agent_debug_log(
+        location="contribution_report.py:_notify_instructor_report_ready",
+        message="email_sent",
+        data={
+            "group_id": group.id,
+            "scores_generated_at": (
+                group.participation_scores_generated_at.isoformat()
+                if group.participation_scores_generated_at
+                else None
+            ),
+        },
+        hypothesis_id="F",
+        run_id="post-fix",
+    )
+    # #endregion
 
     await send_report_ready_notification(
         to_email=instructor_email,
@@ -86,9 +136,16 @@ async def _notify_instructor_report_ready(
 
 async def finalize_ready_report(
     group: ProjectGroup, assignment: Assignment, db: AsyncSession
-) -> ContributionReport:
+) -> ContributionReport | None:
+    ready, blockers = await report_delivery_readiness(group, db)
+    if not ready:
+        group.report_status = ReportStatus.PROCESSING
+        db.add(group)
+        await db.commit()
+        return None
+
     report = await aggregate_and_save_report(group, assignment, db)
-    await try_generate_participation_scores_for_report(group, db)
+    await refresh_contribution_report_cache(group, db)
     await db.commit()
     try:
         await _notify_instructor_report_ready(group, assignment, report, db)
@@ -96,6 +153,68 @@ async def finalize_ready_report(
     except Exception:
         await db.rollback()
     return report
+
+
+async def attempt_complete_report_delivery(
+    group: ProjectGroup, assignment: Assignment, db: AsyncSession
+) -> None:
+    """Sync integrations, generate scores, then mark READY and email when complete."""
+    await db.refresh(group)
+    ready, blockers = await report_delivery_readiness(group, db)
+
+    # #region agent log
+    _agent_debug_log(
+        location="contribution_report.py:attempt_complete_report_delivery",
+        message="delivery_readiness_initial",
+        data={"group_id": group.id, "ready": ready, "blockers": blockers},
+        hypothesis_id="F",
+    )
+    # #endregion
+
+    if not ready:
+        needs_sync = any(
+            blocker
+            in (
+                "participation_not_synced",
+                "github_not_synced",
+                "google_docs_not_synced",
+            )
+            for blocker in blockers
+        )
+        if needs_sync:
+            try:
+                await sync_group_participation(group, db)
+                await db.flush()
+            except Exception:
+                pass
+
+        await db.refresh(group)
+        ready, blockers = await report_delivery_readiness(group, db)
+
+        if not ready and "scores_not_generated" in blockers:
+            await try_generate_participation_scores_for_report(group, db)
+        elif not ready and "scores_stale" in blockers:
+            await maybe_regenerate_scores_after_sync(group, db)
+
+        await db.refresh(group)
+        ready, blockers = await report_delivery_readiness(group, db)
+
+        # #region agent log
+        _agent_debug_log(
+            location="contribution_report.py:attempt_complete_report_delivery",
+            message="delivery_readiness_after_sync",
+            data={"group_id": group.id, "ready": ready, "blockers": blockers},
+            hypothesis_id="F",
+        )
+        # #endregion
+
+    if not ready:
+        group.report_status = ReportStatus.PROCESSING
+        db.add(group)
+        await db.commit()
+        return
+
+    await finalize_ready_report(group, assignment, db)
 
 
 async def check_and_finalize_report(group_id: str) -> None:
@@ -162,7 +281,7 @@ async def check_and_finalize_report(group_id: str) -> None:
             return
 
         if statuses == {MeetingSessionStatus.COMPLETED}:
-            await finalize_ready_report(group, assignment, db)
+            await attempt_complete_report_delivery(group, assignment, db)
 
 
 async def resend_supervisor_notification(

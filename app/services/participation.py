@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import (
+    ContributionReport,
     GroupGithubRepo,
     GroupGoogleDoc,
     GroupMemberRole,
@@ -207,6 +208,62 @@ def _student_memberships(
         for membership in memberships
         if membership.role != GroupMemberRole.INSTRUCTOR
     ]
+
+
+async def _contribution_report_member_cache(
+    group_id: str, db: AsyncSession
+) -> dict[str, dict]:
+    report = await db.scalar(
+        select(ContributionReport)
+        .where(ContributionReport.group_id == group_id)
+        .order_by(ContributionReport.generated_at.desc())
+        .limit(1)
+    )
+    if report is None or not report.final_calculated_scores:
+        return {}
+
+    members = report.final_calculated_scores.get("members") or []
+    if not isinstance(members, list):
+        return {}
+    return {
+        str(member.get("user_id")): member
+        for member in members
+        if isinstance(member, dict) and member.get("user_id")
+    }
+
+
+def _merge_member_metrics(
+    *,
+    github_metrics: GithubMetrics | None,
+    google_metrics: GoogleDocsMetrics | None,
+    google_events: list[GoogleDocSyncEvent],
+    meeting_engagement: MeetingEngagementMetrics | None,
+    cached_member: dict | None,
+) -> tuple[
+    GithubMetrics | None,
+    GoogleDocsMetrics | None,
+    list[GoogleDocSyncEvent],
+    MeetingEngagementMetrics | None,
+]:
+    if cached_member is None:
+        return github_metrics, google_metrics, google_events, meeting_engagement
+
+    if github_metrics is None and cached_member.get("github"):
+        github_metrics = GithubMetrics(**cached_member["github"])
+    if google_metrics is None and cached_member.get("google_docs"):
+        google_metrics = GoogleDocsMetrics(**cached_member["google_docs"])
+    if not google_events and cached_member.get("google_docs_events"):
+        google_events = [
+            GoogleDocSyncEvent(**event)
+            for event in cached_member["google_docs_events"]
+            if isinstance(event, dict)
+        ]
+    if meeting_engagement is None and cached_member.get("meeting_engagement"):
+        meeting_engagement = MeetingEngagementMetrics(
+            **cached_member["meeting_engagement"]
+        )
+
+    return github_metrics, google_metrics, google_events, meeting_engagement
 
 
 def _google_doc_sync_warning(doc_title: str, doc_status) -> str:
@@ -616,6 +673,7 @@ async def get_contributions(
         snapshot_by_user = {s.user_id: s for s in snapshots.all()}
 
     engagement_by_user = await get_engagement_scores_by_user(group.id, db)
+    report_member_cache = await _contribution_report_member_cache(group.id, db)
 
     last_synced_at = None
     if snapshot_by_user:
@@ -659,6 +717,16 @@ async def get_contributions(
                 sessions_attended=engagement_score.sessions_attended,
                 total_sessions=engagement_score.total_sessions,
             )
+
+        github_metrics, google_metrics, google_events, meeting_engagement = (
+            _merge_member_metrics(
+                github_metrics=github_metrics,
+                google_metrics=google_metrics,
+                google_events=google_events,
+                meeting_engagement=meeting_engagement,
+                cached_member=report_member_cache.get(user.id),
+            )
+        )
 
         members.append(
             MemberParticipationOut(

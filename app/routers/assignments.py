@@ -27,11 +27,13 @@ from app.services.classes import (
     require_class_owner,
     serialize_assignment,
 )
-from app.services.contribution_report import resend_supervisor_notification
+from app.services.contribution_report import (
+    attempt_complete_report_delivery,
+    resend_supervisor_notification,
+)
 from app.services.groups import get_group_or_404
 from app.services.meeting_parser import MeetingParseError, parse_attendance_members
 from app.services.participation import get_contributions
-from app.services.participation_scoring import try_generate_participation_scores_for_report
 from app.services.report_creation import (
     MeetingFilePayload,
     bootstrap_assignment_report,
@@ -310,10 +312,10 @@ async def get_report(
 
     contributions = None
     if group.report_status and group.report_status.value == "READY":
-        if group.participation_scores_generated_at is None:
-            await try_generate_participation_scores_for_report(group, db)
-            await db.commit()
-            await db.refresh(group)
+        await attempt_complete_report_delivery(group, assignment, db)
+        await db.refresh(group)
+        contributions = await get_contributions(group, db)
+    elif group.report_status and group.report_status.value == "PROCESSING":
         contributions = await get_contributions(group, db)
 
     return success(
