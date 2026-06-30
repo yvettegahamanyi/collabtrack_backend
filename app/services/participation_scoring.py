@@ -63,6 +63,16 @@ from app.services.benchmark_model import (
     is_benchmark_model_available,
     predict_benchmark_score,
 )
+from app.services.outlier_model import (
+    OutlierModelUnavailableError,
+    detect_student_outlier,
+    is_outlier_model_available,
+)
+from app.services.team_cluster_model import (
+    TeamClusterModelUnavailableError,
+    is_team_cluster_model_available,
+    predict_team_archetype,
+)
 from app.services.dataset import allocate_dataset_group_id
 from app.services.dataset_features import (
     ML_FEATURE_COLUMNS,
@@ -76,6 +86,20 @@ from app.services.participation import get_contributions
 
 
 @dataclass
+class OutlierDetectionResult:
+    is_outlier: bool
+    anomaly_score: float
+    outlier_type: str
+
+
+@dataclass
+class TeamArchetypeResult:
+    cluster_id: int
+    archetype: str
+    archetype_label: str
+
+
+@dataclass
 class ParticipationScoreResult:
     user_id: str
     name: str | None
@@ -83,6 +107,7 @@ class ParticipationScoreResult:
     contributor_tier: str
     features: dict[str, float]
     generated_at: datetime
+    outlier: OutlierDetectionResult | None = None
 
 
 @dataclass
@@ -91,6 +116,7 @@ class ParticipationScoresSummary:
     generated_at: datetime
     scores: list[ParticipationScoreResult]
     warnings: list[str]
+    team_archetype: TeamArchetypeResult | None = None
 
 
 def _tier_label(tier: str) -> str:
@@ -103,6 +129,72 @@ def _tier_label(tier: str) -> str:
 
 def tier_display_label(tier: str) -> str:
     return _tier_label(tier)
+
+
+def _detect_outlier_for_features(
+    features: dict[str, float],
+) -> OutlierDetectionResult | None:
+    if not is_outlier_model_available():
+        return None
+    try:
+        result = detect_student_outlier(features)
+    except OutlierModelUnavailableError:
+        return None
+    return OutlierDetectionResult(
+        is_outlier=bool(result["is_outlier"]),
+        anomaly_score=float(result["anomaly_score"]),
+        outlier_type=str(result["outlier_type"]),
+    )
+
+
+def _predict_team_archetype_for_scores(
+    scores: list[ParticipationScoreResult],
+) -> TeamArchetypeResult | None:
+    if not scores or not is_team_cluster_model_available():
+        return None
+    try:
+        result = predict_team_archetype([score.features for score in scores])
+    except TeamClusterModelUnavailableError:
+        return None
+    return TeamArchetypeResult(
+        cluster_id=int(result["cluster_id"]),
+        archetype=str(result["archetype"]),
+        archetype_label=str(result["archetype_label"]),
+    )
+
+
+def enrich_scores_summary_with_ml_insights(
+    summary: ParticipationScoresSummary,
+    *,
+    include_team_archetype: bool = True,
+) -> ParticipationScoresSummary:
+    if not summary.scores:
+        return summary
+
+    enriched_scores = [
+        ParticipationScoreResult(
+            user_id=score.user_id,
+            name=score.name,
+            predicted_score=score.predicted_score,
+            contributor_tier=score.contributor_tier,
+            features=score.features,
+            generated_at=score.generated_at,
+            outlier=_detect_outlier_for_features(score.features),
+        )
+        for score in summary.scores
+    ]
+    team_archetype = (
+        _predict_team_archetype_for_scores(enriched_scores)
+        if include_team_archetype
+        else None
+    )
+    return ParticipationScoresSummary(
+        group_id=summary.group_id,
+        generated_at=summary.generated_at,
+        scores=enriched_scores,
+        warnings=list(summary.warnings),
+        team_archetype=team_archetype,
+    )
 
 
 def _classify_score(score: float) -> str:
@@ -588,11 +680,13 @@ async def generate_participation_scores(
     db.add(group)
     await db.flush()
 
-    return ParticipationScoresSummary(
-        group_id=group.id,
-        generated_at=generated_at,
-        scores=score_results,
-        warnings=warnings,
+    return enrich_scores_summary_with_ml_insights(
+        ParticipationScoresSummary(
+            group_id=group.id,
+            generated_at=generated_at,
+            scores=score_results,
+            warnings=warnings,
+        )
     )
 
 
@@ -613,16 +707,22 @@ async def get_participation_scores_for_group(
         )
 
     if viewer_is_manager:
-        return existing
+        return enrich_scores_summary_with_ml_insights(
+            existing,
+            include_team_archetype=True,
+        )
 
     filtered = [
         score for score in existing.scores if score.user_id == viewer_user_id
     ]
-    return ParticipationScoresSummary(
-        group_id=group.id,
-        generated_at=existing.generated_at,
-        scores=filtered,
-        warnings=[],
+    return enrich_scores_summary_with_ml_insights(
+        ParticipationScoresSummary(
+            group_id=group.id,
+            generated_at=existing.generated_at,
+            scores=filtered,
+            warnings=[],
+        ),
+        include_team_archetype=True,
     )
 
 
@@ -642,14 +742,16 @@ async def get_member_participation_score(
     if row is None:
         return None
 
-    return ParticipationScoreResult(
+    result = ParticipationScoreResult(
         user_id=row.user_id,
         name=row.user.name,
         predicted_score=row.predicted_score,
         contributor_tier=row.contributor_tier,
         features=dict(row.features or {}),
         generated_at=row.generated_at,
+        outlier=_detect_outlier_for_features(dict(row.features or {})),
     )
+    return result
 
 
 async def try_generate_participation_scores_for_report(

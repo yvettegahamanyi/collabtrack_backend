@@ -3,6 +3,18 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class OutlierDetectionOut(BaseModel):
+    is_outlier: bool
+    anomaly_score: float = Field(ge=0.0)
+    outlier_type: str
+
+
+class TeamArchetypeOut(BaseModel):
+    cluster_id: int
+    archetype: str
+    archetype_label: str
+
+
 class ParticipationScoreOut(BaseModel):
     user_id: str
     name: str | None = None
@@ -10,6 +22,7 @@ class ParticipationScoreOut(BaseModel):
     contributor_tier: str
     features: dict[str, float] = Field(default_factory=dict)
     generated_at: datetime
+    outlier: OutlierDetectionOut | None = None
 
 
 class ParticipationScoresSummaryOut(BaseModel):
@@ -19,3 +32,4 @@ class ParticipationScoresSummaryOut(BaseModel):
     generated_at: datetime
     scores: list[ParticipationScoreOut]
     warnings: list[str] = Field(default_factory=list)
+    team_archetype: TeamArchetypeOut | None = None

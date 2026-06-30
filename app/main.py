@@ -16,7 +16,7 @@ DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 # Import models so they are registered on Base.metadata.
 from app import models  # noqa: F401
 from app.database import engine
-from app.routers import admin, assignments, auth, classes, dataset, groups, integrations, invites, training, users
+from app.routers import admin, assignments, auth, classes, dataset, groups, integrations, instructor, invites, training, users
 
 
 @asynccontextmanager
@@ -96,6 +96,10 @@ tags_metadata = [
     {
         "name": "assignments",
         "description": "Assignment and report management within classes.",
+    },
+    {
+        "name": "instructor",
+        "description": "Instructor dashboard and aggregated insights.",
     },
     # {
     #     "name": "health",
@@ -181,6 +185,7 @@ app.include_router(training.router)
 app.include_router(integrations.router)
 app.include_router(classes.router)
 app.include_router(assignments.router)
+app.include_router(instructor.router)
 
 
 # @app.get("/", tags=["health"], summary="Service root")
