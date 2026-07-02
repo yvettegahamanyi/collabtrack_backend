@@ -243,6 +243,7 @@ async def check_and_finalize_report(group_id: str) -> None:
             ).all()
         )
         if not sessions:
+            await attempt_complete_report_delivery(group, assignment, db)
             return
 
         statuses = {session.status for session in sessions}

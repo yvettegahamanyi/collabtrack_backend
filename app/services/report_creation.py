@@ -196,7 +196,9 @@ def parse_url_list(raw: str | None) -> list[str]:
     return [str(item).strip() for item in parsed if str(item).strip()]
 
 
-def parse_meetings_meta(raw: str) -> list[MeetingInputMeta]:
+def parse_meetings_meta(raw: str | None) -> list[MeetingInputMeta]:
+    if not raw:
+        return []
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -204,9 +206,9 @@ def parse_meetings_meta(raw: str) -> list[MeetingInputMeta]:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Invalid JSON for meetings metadata.",
         ) from exc
-    if not isinstance(parsed, list) or not parsed:
+    if not isinstance(parsed, list):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Meetings metadata must be a non-empty JSON array.",
+            detail="Meetings metadata must be a JSON array.",
         )
     return [MeetingInputMeta.model_validate(item) for item in parsed]

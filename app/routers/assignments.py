@@ -215,13 +215,9 @@ async def create_report(
     github_raw = form.get("github_urls")
     google_raw = form.get("google_doc_urls")
     meetings_raw = form.get("meetings")
-    if not isinstance(meetings_raw, str):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="meetings metadata is required.",
-        )
-
-    meetings_meta = parse_meetings_meta(meetings_raw)
+    meetings_meta = parse_meetings_meta(
+        meetings_raw if isinstance(meetings_raw, str) else None
+    )
     github_list = parse_url_list(
         github_raw if isinstance(github_raw, str) else None
     )
