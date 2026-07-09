@@ -61,6 +61,16 @@ def hash_reset_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
+def generate_reset_otp(user_id: str) -> tuple[str, str]:
+    """Return a (raw_otp, otp_hash) pair for password resets."""
+    raw_otp = f"{secrets.randbelow(1_000_000):06d}"
+    return raw_otp, hash_reset_otp(user_id, raw_otp)
+
+
+def hash_reset_otp(user_id: str, raw_otp: str) -> str:
+    return hashlib.sha256(f"{user_id}:{raw_otp}".encode("utf-8")).hexdigest()
+
+
 def generate_invite_token() -> tuple[str, str]:
     """Return (raw_token, token_hash) for group invitations."""
     raw_token = secrets.token_urlsafe(32)

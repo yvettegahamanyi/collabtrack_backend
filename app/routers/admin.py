@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_admin
-from app.models import User
+from app.models import Assignment, CourseClass, ProjectGroup, User
+from app.schemas.admin import AdminStatsOut
 from app.schemas.response import ApiResponse, success
 from app.schemas.user import UserOut
 
@@ -30,13 +31,64 @@ async def _get_user_or_404(user_id: str, db: AsyncSession) -> User:
 
 
 @router.get(
+    "/stats",
+    response_model=ApiResponse[AdminStatsOut],
+    summary="Platform statistics",
+)
+async def get_admin_stats(db: AsyncSession = Depends(get_db)):
+    """Return aggregate counts for users, reports, classes, and assignments."""
+    user_count = (
+        await db.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(User.is_sandbox.is_(False))
+        )
+        or 0
+    )
+    active_user_count = (
+        await db.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(User.is_active.is_(True), User.is_sandbox.is_(False))
+        )
+        or 0
+    )
+    report_count = (
+        await db.scalar(
+            select(func.count())
+            .select_from(ProjectGroup)
+            .where(ProjectGroup.assignment_id.is_not(None))
+        )
+        or 0
+    )
+    class_count = await db.scalar(select(func.count()).select_from(CourseClass)) or 0
+    assignment_count = (
+        await db.scalar(select(func.count()).select_from(Assignment)) or 0
+    )
+    return success(
+        data=AdminStatsOut(
+            user_count=user_count,
+            active_user_count=active_user_count,
+            report_count=report_count,
+            class_count=class_count,
+            assignment_count=assignment_count,
+        ),
+        message="Admin statistics retrieved successfully.",
+    )
+
+
+@router.get(
     "/users",
     response_model=ApiResponse[list[UserOut]],
     summary="List all users",
 )
 async def list_users(db: AsyncSession = Depends(get_db)):
     """Return all users, most recently created first."""
-    result = await db.scalars(select(User).order_by(User.created_at.desc()))
+    result = await db.scalars(
+        select(User)
+        .where(User.is_sandbox.is_(False))
+        .order_by(User.created_at.desc())
+    )
     users = [UserOut.model_validate(user) for user in result.all()]
     return success(
         data=users,

@@ -136,6 +136,9 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true"), nullable=False
     )
+    is_sandbox: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
     account_status: Mapped[AccountStatus] = mapped_column(
         SAEnum(AccountStatus),
         default=AccountStatus.ACTIVE,
@@ -310,6 +313,9 @@ class ProjectGroup(Base):
     description: Mapped[str | None] = mapped_column(String)
     assignment_status: Mapped[ServiceType] = mapped_column(
         SAEnum(ServiceType), default=ServiceType.ACTIVE
+    )
+    is_sandbox: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
     )
     git_weight: Mapped[float | None] = mapped_column(Float)
     doc_weight: Mapped[float | None] = mapped_column(Float)

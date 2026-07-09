@@ -35,9 +35,22 @@ class RequestPasswordReset(BaseModel):
 
 
 class ResetPassword(BaseModel):
-    token: str = Field(
-        description="The raw reset token issued by `/auth/request-password-reset`.",
-        examples=["QbTzs_3MFuQ1amtnk86srmR_kEuwl6gdctkHZz0rOXQ"],
+    email: EmailStr = Field(examples=["student@example.com"])
+    otp: str = Field(
+        min_length=6,
+        max_length=6,
+        pattern=r"^\d{6}$",
+        description="The 6-digit verification code sent to the user's email.",
+        examples=["482913"],
+    )
+    new_password: str = Field(
+        min_length=8, max_length=128, examples=["NewSecret123!"]
+    )
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(
+        min_length=1, max_length=128, examples=["OldSecret123!"]
     )
     new_password: str = Field(
         min_length=8, max_length=128, examples=["NewSecret123!"]
@@ -45,10 +58,4 @@ class ResetPassword(BaseModel):
 
 
 class PasswordResetData(BaseModel):
-    """DEV ONLY: reset_token is returned until email delivery is wired up."""
-
-    reset_token: str | None = Field(
-        default=None,
-        description="DEV ONLY: the raw reset token. Removed once email is wired up.",
-        examples=["QbTzs_3MFuQ1amtnk86srmR_kEuwl6gdctkHZz0rOXQ"],
-    )
+    """Empty payload; reset codes are delivered by email only."""

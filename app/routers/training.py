@@ -113,13 +113,13 @@ async def create_training_collection(
 @router.get(
     "/collections",
     response_model=ApiResponse[list[TrainingCollectionOut]],
-    summary="List training collections for the current user",
+    summary="List all training collections",
 )
 async def list_collections(
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    collections = await list_training_collections(current_user.id, db)
+    collections = await list_training_collections(db)
     return success(
         data=[TrainingCollectionOut.model_validate(item) for item in collections],
         message="Training collections retrieved successfully.",
@@ -133,8 +133,8 @@ async def list_collections(
 )
 async def get_collection(
     collection_id: str,
-    current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    detail = await get_training_collection_detail(collection_id, current_user.id, db)
+    detail = await get_training_collection_detail(collection_id, db)
     return success(data=detail, message="Training collection retrieved successfully.")

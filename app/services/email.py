@@ -134,6 +134,23 @@ async def send_email(*, to_email: str, subject: str, body: str) -> None:
     )
 
 
+async def send_password_reset_otp_email(
+    *,
+    to_email: str,
+    otp: str,
+    expire_minutes: int,
+) -> None:
+    subject = "Your CollabTrack password reset code"
+    body = (
+        f"Hello,\n\n"
+        f"Your password reset verification code is: {otp}\n\n"
+        f"This code expires in {expire_minutes} minutes. "
+        f"If you did not request a password reset, you can ignore this email.\n\n"
+        f"— CollabTrack"
+    )
+    await send_email(to_email=to_email, subject=subject, body=body)
+
+
 async def send_report_ready_notification(
     *,
     to_email: str,

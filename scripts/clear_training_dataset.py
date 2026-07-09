@@ -13,9 +13,6 @@ from app.models import (
     User,
 )
 
-TRAINING_GROUP_DESCRIPTION = "Sandbox group for training data collection"
-SANDBOX_EMAIL_PATTERN = "%@collabtrack.local"
-
 
 async def main() -> None:
     async with AsyncSessionLocal() as db:
@@ -30,17 +27,13 @@ async def main() -> None:
         training_groups = list(
             (
                 await db.scalars(
-                    select(ProjectGroup).where(
-                        ProjectGroup.description == TRAINING_GROUP_DESCRIPTION
-                    )
+                    select(ProjectGroup).where(ProjectGroup.is_sandbox.is_(True))
                 )
             ).all()
         )
         sandbox_users = list(
             (
-                await db.scalars(
-                    select(User).where(User.email.like(SANDBOX_EMAIL_PATTERN))
-                )
+                await db.scalars(select(User).where(User.is_sandbox.is_(True)))
             ).all()
         )
 

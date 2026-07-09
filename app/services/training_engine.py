@@ -185,6 +185,7 @@ async def collect_training_data(
         description="Sandbox group for training data collection",
         assignment_status=ServiceType.DONE,
         owner_id=collector.id,
+        is_sandbox=True,
     )
     db.add(group)
     await db.flush()
@@ -220,6 +221,7 @@ async def collect_training_data(
             name=row.name,
             role=RoleType.STUDENT,
             is_active=True,
+            is_sandbox=True,
         )
         db.add(sandbox_user)
         await db.flush()
@@ -417,15 +419,11 @@ async def collect_training_data(
 
 async def get_training_collection_detail(
     collection_id: str,
-    user_id: str,
     db: AsyncSession,
 ) -> TrainingCollectionDetailOut:
     collection = await db.scalar(
         select(TrainingCollection)
-        .where(
-            TrainingCollection.id == collection_id,
-            TrainingCollection.created_by_user_id == user_id,
-        )
+        .where(TrainingCollection.id == collection_id)
         .options(selectinload(TrainingCollection.members))
     )
     if collection is None:
@@ -464,12 +462,8 @@ async def get_training_collection_detail(
     )
 
 
-async def list_training_collections(
-    user_id: str, db: AsyncSession
-) -> list[TrainingCollection]:
+async def list_training_collections(db: AsyncSession) -> list[TrainingCollection]:
     result = await db.scalars(
-        select(TrainingCollection)
-        .where(TrainingCollection.created_by_user_id == user_id)
-        .order_by(TrainingCollection.created_at.desc())
+        select(TrainingCollection).order_by(TrainingCollection.created_at.desc())
     )
     return list(result.all())

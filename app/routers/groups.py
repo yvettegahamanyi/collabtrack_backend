@@ -163,6 +163,7 @@ async def list_my_groups(
         select(ProjectGroup)
         .join(GroupMembership, GroupMembership.group_id == ProjectGroup.id)
         .where(GroupMembership.user_id == current_user.id)
+        .where(ProjectGroup.is_sandbox.is_(False))
         .options(
             selectinload(ProjectGroup.memberships).selectinload(GroupMembership.user)
         )

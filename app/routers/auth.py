@@ -1,9 +1,10 @@
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 load_dotenv()
@@ -12,15 +13,17 @@ RESET_TOKEN_EXPIRE_MINUTES = int(os.getenv("RESET_TOKEN_EXPIRE_MINUTES", "30"))
 
 from app.core.security import (
     create_access_token,
-    generate_reset_token,
+    generate_reset_otp,
     hash_password,
-    hash_reset_token,
+    hash_reset_otp,
     verify_password,
 )
 from app.database import get_db
+from app.dependencies import get_current_user
 from app.models import AccountStatus, PasswordResetToken, User
 from app.schemas.auth import (
     AuthResponse,
+    ChangePasswordRequest,
     LoginRequest,
     PasswordResetData,
     RegisterRequest,
@@ -30,11 +33,13 @@ from app.schemas.auth import (
 )
 from app.schemas.response import ApiResponse, success
 from app.schemas.user import UserOut
+from app.services.email import send_password_reset_otp_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 _PASSWORD_RESET_MESSAGE = (
-    "If an account exists for that email, a reset token has been issued."
+    "If an account exists for that email, a verification code has been sent."
 )
 
 
@@ -131,28 +136,47 @@ async def login(
 @router.post(
     "/request-password-reset",
     response_model=ApiResponse[PasswordResetData],
-    summary="Request a password reset token",
+    summary="Request a password reset verification code",
 )
 async def request_password_reset(
     payload: RequestPasswordReset, db: AsyncSession = Depends(get_db)
 ):
-    """Request a password reset token."""
+    """Send a one-time verification code to the user's email."""
     user = await db.scalar(select(User).where(User.email == payload.email))
 
-    reset_token: str | None = None
-    if user is not None and user.is_active:
-        raw_token, token_hash = generate_reset_token()
+    if user is not None and user.is_active and not user.is_sandbox:
+        await db.execute(
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.used.is_(False),
+            )
+            .values(used=True)
+        )
+
+        raw_otp, otp_hash = generate_reset_otp(user.id)
         reset = PasswordResetToken(
             user_id=user.id,
-            token_hash=token_hash,
+            token_hash=otp_hash,
             expires_at=datetime.now(timezone.utc)
             + timedelta(minutes=RESET_TOKEN_EXPIRE_MINUTES),
         )
         db.add(reset)
-        reset_token = raw_token
+        await db.flush()
+
+        try:
+            await send_password_reset_otp_email(
+                to_email=user.email,
+                otp=raw_otp,
+                expire_minutes=RESET_TOKEN_EXPIRE_MINUTES,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send password reset email to %s", user.email
+            )
 
     return success(
-        data=PasswordResetData(reset_token=reset_token),
+        data=PasswordResetData(),
         message=_PASSWORD_RESET_MESSAGE,
         code=status.HTTP_200_OK,
     )
@@ -161,39 +185,78 @@ async def request_password_reset(
 @router.post(
     "/reset-password",
     response_model=ApiResponse[None],
-    summary="Reset password using a token",
+    summary="Reset password using a verification code",
     responses={
         200: {"description": "Password reset successfully."},
-        400: {"description": "Invalid or expired reset token."},
+        400: {"description": "Invalid or expired verification code."},
     },
 )
 async def reset_password(payload: ResetPassword, db: AsyncSession = Depends(get_db)):
-    token_hash = hash_reset_token(payload.token)
-    reset = await db.scalar(
-        select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
-    )
-
-    if (
-        reset is None
-        or reset.used
-        or reset.expires_at < datetime.now(timezone.utc)
-    ):
+    user = await db.scalar(select(User).where(User.email == payload.email))
+    if user is None or not user.is_active or user.is_sandbox:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset token.",
+            detail="Invalid or expired verification code.",
         )
 
-    user = await db.get(User, reset.user_id)
-    if user is None:
+    otp_hash = hash_reset_otp(user.id, payload.otp)
+    reset = await db.scalar(
+        select(PasswordResetToken)
+        .where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.token_hash == otp_hash,
+            PasswordResetToken.used.is_(False),
+            PasswordResetToken.expires_at >= datetime.now(timezone.utc),
+        )
+        .order_by(PasswordResetToken.created_at.desc())
+    )
+
+    if reset is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset token.",
+            detail="Invalid or expired verification code.",
         )
 
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False
     reset.used = True
+    db.add(user)
     return success(
         message="Password has been reset successfully.",
+        code=status.HTTP_200_OK,
+    )
+
+
+@router.post(
+    "/change-password",
+    response_model=ApiResponse[None],
+    summary="Change password for the authenticated user",
+    responses={
+        200: {"description": "Password changed successfully."},
+        400: {"description": "Current password is incorrect."},
+        401: {"description": "Missing or invalid token."},
+    },
+)
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not verify_password(payload.current_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect.",
+        )
+    if payload.current_password == payload.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from the current password.",
+        )
+
+    current_user.password_hash = hash_password(payload.new_password)
+    current_user.must_change_password = False
+    db.add(current_user)
+    return success(
+        message="Password changed successfully.",
         code=status.HTTP_200_OK,
     )
