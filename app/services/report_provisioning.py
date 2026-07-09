@@ -2,7 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import GroupMemberRole, User
 from app.services.group_members import add_member_if_missing
-from app.services.meeting_parser import AttendanceMemberRow
+from app.services.meeting_parser import MemberRow
 from app.services.user_provisioning import get_or_create_student
 
 
@@ -11,9 +11,9 @@ async def provision_members_from_attendance(
     *,
     group_id: str,
     instructor_id: str,
-    rows: list[AttendanceMemberRow],
+    rows: list[MemberRow],
 ) -> int:
-    """Provision students from attendance rows and add them to the group."""
+    """Provision students from member rows and add them to the group."""
     added = 0
     for row in rows:
         student = await get_or_create_student(

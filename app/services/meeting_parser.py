@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 
 _LINE_PATTERN = re.compile(r"^\[\d{2}:\d{2}\] .+?: .+$")
+_TIMESTAMP_PREFIX = re.compile(r"^\[(\d{2}):(\d{2})\]")
+_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _FACILITATOR_TRUE = {"yes", "true", "1"}
 _FACILITATOR_FALSE = {"no", "false", "0"}
 
@@ -94,25 +96,91 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
 
 
 @dataclass
-class AttendanceMemberRow:
+class MemberRow:
     name: str
     email: str
-    duration_minutes: int
-    was_facilitator: bool
 
 
-def parse_attendance_members(content: str) -> list[AttendanceMemberRow]:
-    """Parse attendance CSV and return roster rows with required emails."""
-    attendance = parse_attendance_csv(content)
-    return [
-        AttendanceMemberRow(
-            name=name,
-            email=record.email or "",
-            duration_minutes=record.duration_minutes,
-            was_facilitator=record.was_facilitator,
+def _parse_member_csv(content: str) -> list[MemberRow]:
+    reader = csv.DictReader(io.StringIO(content))
+    fieldnames = reader.fieldnames or []
+    lookup = {name.strip().lower(): name for name in fieldnames}
+    name_col = lookup.get("name")
+    email_col = lookup.get("email")
+    if name_col is None or email_col is None:
+        raise MeetingParseError(
+            "Member list CSV must have 'Name' and 'Email' columns."
         )
-        for name, record in attendance.items()
-    ]
+
+    rows: list[MemberRow] = []
+    for row_num, row in enumerate(reader, start=2):
+        name = (row.get(name_col) or "").strip()
+        email = (row.get(email_col) or "").strip().lower()
+        if not name and not email:
+            continue
+        if not name or not _EMAIL_PATTERN.fullmatch(email):
+            raise MeetingParseError(
+                f"Member list row {row_num}: a name and a valid email are required."
+            )
+        rows.append(MemberRow(name=name, email=email))
+    return rows
+
+
+def _parse_member_lines(content: str) -> list[MemberRow]:
+    rows: list[MemberRow] = []
+    for line_num, raw_line in enumerate(content.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _EMAIL_PATTERN.search(line)
+        if match is None:
+            raise MeetingParseError(
+                f"Member list line {line_num}: no email address found."
+            )
+        email = match.group(0).lower()
+        name = (line[: match.start()] + line[match.end():]).strip(" ,;<>\t-")
+        if not name:
+            raise MeetingParseError(
+                f"Member list line {line_num}: member name is missing."
+            )
+        rows.append(MemberRow(name=name, email=email))
+    return rows
+
+
+def parse_member_list(content: str) -> list[MemberRow]:
+    """Parse a group member list with names and emails.
+
+    Accepts a CSV with Name/Email columns, or plain text lines such as
+    'Jane Doe, jane@example.com' or 'Jane Doe <jane@example.com>'.
+    """
+    stripped = content.strip()
+    if not stripped:
+        raise MeetingParseError("Member list file is empty.")
+
+    first_line = stripped.splitlines()[0].lower()
+    if "name" in first_line and "email" in first_line and "@" not in first_line:
+        rows = _parse_member_csv(content)
+    else:
+        rows = _parse_member_lines(content)
+
+    deduped: dict[str, MemberRow] = {}
+    for row in rows:
+        deduped.setdefault(row.email, row)
+    if not deduped:
+        raise MeetingParseError("Member list contains no members.")
+    return list(deduped.values())
+
+
+def last_timestamp_minutes(content: str) -> int:
+    """Return the minute of the last [HH:MM] timestamp in a transcript/chat."""
+    latest = 0
+    for raw_line in content.splitlines():
+        match = _TIMESTAMP_PREFIX.match(raw_line.strip())
+        if match is None:
+            continue
+        minutes = int(match.group(1)) * 60 + int(match.group(2))
+        latest = max(latest, minutes)
+    return latest
 
 
 def parse_transcript_or_chat(content: str, *, label: str) -> dict[str, int]:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from io import BytesIO
 
 from fastapi import HTTPException, UploadFile, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
@@ -18,11 +19,11 @@ from app.models import (
     User,
 )
 from app.schemas.meetings import MeetingSessionCreate
-from app.schemas.report import CreateReportOut, MeetingInputMeta
+from app.schemas.report import CreateReportOut, ReportMemberInput
 from app.services.assignments import allocate_group_number
 from app.services.contribution_report import check_and_finalize_report
 from app.services.integrations import parse_github_repo_url, parse_google_doc_url
-from app.services.meeting_parser import MeetingParseError, parse_attendance_members
+from app.services.meeting_parser import MemberRow
 from app.services.meetings import create_meeting_session, upload_meeting_files
 from app.services.participation import link_github_repo, link_google_doc, sync_group_participation
 from app.services.report_provisioning import provision_members_from_attendance
@@ -32,13 +33,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MeetingFilePayload:
-    meta: MeetingInputMeta
-    attendance: bytes
     transcript: bytes
-    chat: bytes
-    attendance_filename: str
     transcript_filename: str
-    chat_filename: str
+    chat: bytes | None = None
+    chat_filename: str | None = None
 
 
 def _bytes_upload(content: bytes, filename: str) -> UploadFile:
@@ -49,7 +47,7 @@ async def bootstrap_assignment_report(
     *,
     assignment_id: str,
     instructor: User,
-    attendance_content: bytes,
+    members: list[MemberRow],
     github_urls: list[str],
     google_doc_urls: list[str],
     db: AsyncSession,
@@ -60,14 +58,12 @@ async def bootstrap_assignment_report(
             detail="Add at least one GitHub repository URL or Google Doc URL.",
         )
 
-    try:
-        content = attendance_content.decode("utf-8")
-        member_rows = parse_attendance_members(content)
-    except MeetingParseError as exc:
+    if not members:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
+            detail="Add at least one group member.",
+        )
+    member_rows = members
 
     group_number = await allocate_group_number(assignment_id, db)
     group_name = f"Group {group_number}"
@@ -139,23 +135,21 @@ async def process_assignment_report_meetings(
             for payload in meetings:
                 session = await create_meeting_session(
                     group,
-                    MeetingSessionCreate(
-                        session_label=payload.meta.session_label,
-                        session_date=payload.meta.session_date,
-                        duration_minutes=payload.meta.duration_minutes,
-                    ),
+                    MeetingSessionCreate(),
                     instructor,
                     db,
                 )
+                chat_upload = None
+                if payload.chat is not None:
+                    chat_upload = _bytes_upload(
+                        payload.chat, payload.chat_filename or "chat.txt"
+                    )
                 await upload_meeting_files(
                     session,
-                    attendance_file=_bytes_upload(
-                        payload.attendance, payload.attendance_filename
-                    ),
                     transcript_file=_bytes_upload(
                         payload.transcript, payload.transcript_filename
                     ),
-                    chat_file=_bytes_upload(payload.chat, payload.chat_filename),
+                    chat_file=chat_upload,
                     user=instructor,
                     db=db,
                 )
@@ -196,7 +190,7 @@ def parse_url_list(raw: str | None) -> list[str]:
     return [str(item).strip() for item in parsed if str(item).strip()]
 
 
-def parse_meetings_meta(raw: str | None) -> list[MeetingInputMeta]:
+def parse_members_payload(raw: str | None) -> list[MemberRow]:
     if not raw:
         return []
     try:
@@ -204,11 +198,25 @@ def parse_meetings_meta(raw: str | None) -> list[MeetingInputMeta]:
     except json.JSONDecodeError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Invalid JSON for meetings metadata.",
+            detail="Invalid JSON for members list.",
         ) from exc
     if not isinstance(parsed, list):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Meetings metadata must be a JSON array.",
+            detail="Members list must be a JSON array.",
         )
-    return [MeetingInputMeta.model_validate(item) for item in parsed]
+
+    rows: dict[str, MemberRow] = {}
+    for index, item in enumerate(parsed, start=1):
+        try:
+            member = ReportMemberInput.model_validate(item)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Member {index}: a name and a valid email are required.",
+            ) from exc
+        email = member.email.lower()
+        rows.setdefault(
+            email, MemberRow(name=member.name.strip(), email=email)
+        )
+    return list(rows.values())

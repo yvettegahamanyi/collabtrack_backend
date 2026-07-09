@@ -4,9 +4,9 @@ from pydantic import BaseModel, Field
 
 
 class MeetingSessionCreate(BaseModel):
-    session_label: str = Field(min_length=1, max_length=200)
-    session_date: date
-    duration_minutes: int = Field(gt=0, le=600)
+    session_label: str | None = Field(default=None, min_length=1, max_length=200)
+    session_date: date | None = None
+    duration_minutes: int | None = Field(default=None, gt=0, le=600)
 
 
 class NameMappingItem(BaseModel):
@@ -26,8 +26,8 @@ class MeetingSessionOut(BaseModel):
     id: str
     group_id: str
     session_label: str
-    session_date: date
-    duration_minutes: int
+    session_date: date | None
+    duration_minutes: int | None
     status: str
     uploaded_at: datetime | None = None
     processed_at: datetime | None = None

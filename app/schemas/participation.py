@@ -51,6 +51,7 @@ class ContributionsOut(BaseModel):
     group_id: str
     last_synced_at: datetime | None = None
     members: list[MemberParticipationOut] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SyncOut(BaseModel):

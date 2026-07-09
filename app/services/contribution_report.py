@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -17,7 +18,6 @@ from app.models import (
 from app.services.email import send_report_ready_notification
 from app.services.participation import get_contributions, sync_group_participation
 from app.services.participation_scoring import (
-    _agent_debug_log,
     maybe_regenerate_scores_after_sync,
     report_delivery_readiness,
     try_generate_participation_scores_for_report,
@@ -82,16 +82,8 @@ async def _notify_instructor_report_ready(
     if report.notification_sent_at is not None:
         return
 
-    ready, blockers = await report_delivery_readiness(group, db)
+    ready, blockers, _warnings = await report_delivery_readiness(group, db)
     if not ready:
-        # #region agent log
-        _agent_debug_log(
-            location="contribution_report.py:_notify_instructor_report_ready",
-            message="email_deferred",
-            data={"group_id": group.id, "blockers": blockers},
-            hypothesis_id="F",
-        )
-        # #endregion
         return
 
     group_with_owner = await db.scalar(
@@ -105,23 +97,6 @@ async def _notify_instructor_report_ready(
     instructor_email = group_with_owner.owner.email
     if not instructor_email:
         return
-
-    # #region agent log
-    _agent_debug_log(
-        location="contribution_report.py:_notify_instructor_report_ready",
-        message="email_sent",
-        data={
-            "group_id": group.id,
-            "scores_generated_at": (
-                group.participation_scores_generated_at.isoformat()
-                if group.participation_scores_generated_at
-                else None
-            ),
-        },
-        hypothesis_id="F",
-        run_id="post-fix",
-    )
-    # #endregion
 
     await send_report_ready_notification(
         to_email=instructor_email,
@@ -137,7 +112,7 @@ async def _notify_instructor_report_ready(
 async def finalize_ready_report(
     group: ProjectGroup, assignment: Assignment, db: AsyncSession
 ) -> ContributionReport | None:
-    ready, blockers = await report_delivery_readiness(group, db)
+    ready, blockers, _warnings = await report_delivery_readiness(group, db)
     if not ready:
         group.report_status = ReportStatus.PROCESSING
         db.add(group)
@@ -151,6 +126,9 @@ async def finalize_ready_report(
         await _notify_instructor_report_ready(group, assignment, report, db)
         await db.commit()
     except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to notify instructor for group %s", group.id
+        )
         await db.rollback()
     return report
 
@@ -160,16 +138,7 @@ async def attempt_complete_report_delivery(
 ) -> None:
     """Sync integrations, generate scores, then mark READY and email when complete."""
     await db.refresh(group)
-    ready, blockers = await report_delivery_readiness(group, db)
-
-    # #region agent log
-    _agent_debug_log(
-        location="contribution_report.py:attempt_complete_report_delivery",
-        message="delivery_readiness_initial",
-        data={"group_id": group.id, "ready": ready, "blockers": blockers},
-        hypothesis_id="F",
-    )
-    # #endregion
+    ready, blockers, _warnings = await report_delivery_readiness(group, db)
 
     if not ready:
         needs_sync = any(
@@ -189,7 +158,7 @@ async def attempt_complete_report_delivery(
                 pass
 
         await db.refresh(group)
-        ready, blockers = await report_delivery_readiness(group, db)
+        ready, blockers, _warnings = await report_delivery_readiness(group, db)
 
         if not ready and "scores_not_generated" in blockers:
             await try_generate_participation_scores_for_report(group, db)
@@ -197,16 +166,7 @@ async def attempt_complete_report_delivery(
             await maybe_regenerate_scores_after_sync(group, db)
 
         await db.refresh(group)
-        ready, blockers = await report_delivery_readiness(group, db)
-
-        # #region agent log
-        _agent_debug_log(
-            location="contribution_report.py:attempt_complete_report_delivery",
-            message="delivery_readiness_after_sync",
-            data={"group_id": group.id, "ready": ready, "blockers": blockers},
-            hypothesis_id="F",
-        )
-        # #endregion
+        ready, blockers, _warnings = await report_delivery_readiness(group, db)
 
     if not ready:
         group.report_status = ReportStatus.PROCESSING

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -600,6 +600,14 @@ async def sync_group_participation(
         platform_identities=platform_identities,
     )
 
+    if repo_list and not github_metrics_by_user:
+        sync_warnings.append(
+            "A GitHub repository is linked but no commits could be matched to "
+            "group members. This usually happens when the emails used to list "
+            "the members don't match the GitHub commit-author emails. Ask "
+            "members to connect GitHub in Settings, or verify their commit emails."
+        )
+
     for membership in member_list:
         user = membership.user
         identity = (platform_identities or {}).get(user.id)
@@ -745,10 +753,37 @@ async def get_contributions(
             )
         )
 
+    warnings: list[str] = []
+    if last_synced_at is not None:
+        repo_count = await db.scalar(
+            select(func.count())
+            .select_from(GroupGithubRepo)
+            .where(GroupGithubRepo.group_id == group.id)
+        )
+        if repo_count and not any(member.github is not None for member in members):
+            warnings.append(
+                "A GitHub repository is linked but no commits could be matched to "
+                "group members. This usually happens when the emails used to list "
+                "the members don't match the GitHub commit-author emails. The report "
+                "was generated without GitHub contribution data."
+            )
+        doc_count = await db.scalar(
+            select(func.count())
+            .select_from(GroupGoogleDoc)
+            .where(GroupGoogleDoc.group_id == group.id)
+        )
+        if doc_count and not any(member.google_docs is not None for member in members):
+            warnings.append(
+                "A Google Doc is linked but no edits could be matched to group "
+                "members. The report was generated without Google Docs contribution "
+                "data."
+            )
+
     return ContributionsOut(
         group_id=group.id,
         last_synced_at=last_synced_at,
         members=members,
+        warnings=warnings,
     )
 
 

@@ -46,6 +46,7 @@ from app.schemas.integration import (
 )
 from app.schemas.participation import ContributionsOut, MemberParticipationOut, SyncOut
 from app.schemas.participation_score import (
+    LLMRationaleOut,
     OutlierDetectionOut,
     ParticipationScoreOut,
     ParticipationScoresSummaryOut,
@@ -676,9 +677,9 @@ async def get_meeting(
 async def upload_meeting(
     group_id: str,
     meeting_id: str,
-    attendance_file: UploadFile = File(...),
     transcript_file: UploadFile = File(...),
-    chat_file: UploadFile = File(...),
+    attendance_file: UploadFile | None = File(None),
+    chat_file: UploadFile | None = File(None),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -687,8 +688,8 @@ async def upload_meeting(
     session = await get_meeting_session_or_404(group.id, meeting_id, db)
     data = await upload_meeting_files(
         session,
-        attendance_file=attendance_file,
         transcript_file=transcript_file,
+        attendance_file=attendance_file,
         chat_file=chat_file,
         user=current_user,
         db=db,
@@ -760,6 +761,20 @@ async def get_group_engagement(
     )
 
 
+def _serialize_rationale(score) -> LLMRationaleOut | None:
+    rationale = getattr(score, "llm_rationale", None)
+    if not rationale:
+        return None
+    return LLMRationaleOut(
+        reasoning=rationale.get("reasoning", ""),
+        top_area=rationale.get("top_area"),
+        flags=list(rationale.get("flags") or []),
+        confidence=rationale.get("confidence", 0.5),
+        group_observations=rationale.get("group_observations", ""),
+        model_version=rationale.get("model_version", ""),
+    )
+
+
 def _serialize_scores_summary(summary) -> ParticipationScoresSummaryOut:
     team_archetype = None
     if summary.team_archetype is not None:
@@ -789,6 +804,7 @@ def _serialize_scores_summary(summary) -> ParticipationScoresSummaryOut:
                     if score.outlier is not None
                     else None
                 ),
+                llm_rationale=_serialize_rationale(score),
             )
             for score in summary.scores
         ],
@@ -902,6 +918,7 @@ async def get_member_participation_score_endpoint(
                 if score.outlier is not None
                 else None
             ),
+            llm_rationale=_serialize_rationale(score),
         ),
         message="Participation score retrieved successfully.",
     )

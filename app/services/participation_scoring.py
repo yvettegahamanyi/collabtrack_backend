@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-import time
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -10,7 +9,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import get_settings
 from app.models import (
+    Assignment,
     CollabTrackDataset,
     GroupGithubRepo,
     GroupGoogleDoc,
@@ -23,45 +24,9 @@ from app.models import (
     ParticipationSnapshot,
     ProjectGroup,
 )
-
-_DEBUG_LOG_PATH = (
-    "/Users/gahamanyi/Documents/alu/CAPSTON PROJECT/.cursor/debug-2a07f5.log"
-)
-
-
-def _agent_debug_log(
-    *,
-    location: str,
-    message: str,
-    data: dict,
-    hypothesis_id: str,
-    run_id: str = "pre-fix",
-) -> None:
-    # #region agent log
-    try:
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as log_file:
-            log_file.write(
-                json.dumps(
-                    {
-                        "sessionId": "2a07f5",
-                        "runId": run_id,
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # #endregion
 from app.services.benchmark_model import (
     BenchmarkModelUnavailableError,
     classify_contributor,
-    is_benchmark_model_available,
-    predict_benchmark_score,
 )
 from app.services.outlier_model import (
     OutlierModelUnavailableError,
@@ -77,11 +42,18 @@ from app.services.dataset import allocate_dataset_group_id
 from app.services.dataset_features import (
     ML_FEATURE_COLUMNS,
     build_group_activity_totals,
-    compute_benchmark,
     compute_member_features_from_contributions,
-    compute_rescaled_weights,
 )
 from app.services.groups import get_group_members
+from app.services.llm_participation import (
+    GroupScoringInput,
+    LLMScoringError,
+    LLMScoringUnavailableError,
+    MemberScoringInput,
+    is_llm_scoring_available,
+    ref_for_index,
+    score_group,
+)
 from app.services.participation import get_contributions
 
 
@@ -108,6 +80,7 @@ class ParticipationScoreResult:
     features: dict[str, float]
     generated_at: datetime
     outlier: OutlierDetectionResult | None = None
+    llm_rationale: dict | None = None
 
 
 @dataclass
@@ -180,6 +153,7 @@ def enrich_scores_summary_with_ml_insights(
             features=score.features,
             generated_at=score.generated_at,
             outlier=_detect_outlier_for_features(score.features),
+            llm_rationale=score.llm_rationale,
         )
         for score in summary.scores
     ]
@@ -208,18 +182,6 @@ def _classify_score(score: float) -> str:
         return "below"
 
 
-def _predict_member_score(
-    features: dict[str, float], *, rule_based_score: float
-) -> tuple[float, bool]:
-    """Return (score, used_ml). Falls back to rule-based when ML artifacts are absent."""
-    if not is_benchmark_model_available():
-        return rule_based_score, False
-    try:
-        return predict_benchmark_score(features), True
-    except BenchmarkModelUnavailableError:
-        return rule_based_score, False
-
-
 async def _meeting_activity_totals(
     group: ProjectGroup, db: AsyncSession
 ) -> tuple[int, int, int]:
@@ -246,51 +208,95 @@ async def _meeting_activity_totals(
     return len(session_ids), speaking_total, chat_total
 
 
-def _benchmark_features(features: dict[str, float]) -> dict[str, float]:
-    benchmark_features = dict(features)
-    benchmark_features["speaking_ratio"] = benchmark_features.pop(
-        "speaking_participation_ratio"
-    )
-    benchmark_features["chat_participation"] = benchmark_features.pop(
-        "chat_participation_ratio"
-    )
-    return benchmark_features
+async def _load_assignment_description(
+    group: ProjectGroup, db: AsyncSession
+) -> str:
+    """Fetch the assignment description for LLM context, or a neutral default."""
+    parts: list[str] = []
+    if group.assignment_id:
+        assignment = await db.get(Assignment, group.assignment_id)
+        if assignment is not None:
+            if assignment.title:
+                parts.append(f"Assignment: {assignment.title}")
+            if assignment.description:
+                parts.append(assignment.description)
+    if group.description:
+        parts.append(f"Group brief: {group.description}")
+    return "\n".join(parts)
 
 
-async def _rule_based_scores_by_user(
-    group: ProjectGroup,
+def _build_llm_group_input(
+    *,
+    assignment_description: str,
+    student_memberships: list[GroupMembership],
     contributions,
-    student_user_ids: set[str],
-    db: AsyncSession,
-) -> dict[str, float]:
-    session_count, speaking_total, chat_total = await _meeting_activity_totals(
-        group, db
-    )
-    group_activity_totals = build_group_activity_totals(
-        contributions.members,
-        total_meeting_sessions=session_count,
-        total_speaking_turns=speaking_total,
-        total_chat_messages=chat_total,
-    )
-    feature_rows = compute_member_features_from_contributions(contributions)
-    benchmark_inputs = [
-        _benchmark_features(dict(row.features))
-        for row in feature_rows
-        if row.user_id in student_user_ids
-    ]
-    if not benchmark_inputs:
-        return {}
+    feature_by_user: dict,
+    group_totals: dict[str, float],
+) -> tuple[GroupScoringInput, dict[str, GroupMembership]]:
+    """Assemble the anonymized per-group payload for the LLM."""
+    contribution_by_user = {
+        member.user_id: member for member in contributions.members
+    }
+    member_by_ref: dict[str, GroupMembership] = {}
+    llm_members: list[MemberScoringInput] = []
 
-    weights = compute_rescaled_weights(group_activity_totals, benchmark_inputs)
-    scores: dict[str, float] = {}
-    for row in feature_rows:
-        if row.user_id not in student_user_ids:
-            continue
-        scores[row.user_id] = compute_benchmark(
-            _benchmark_features(dict(row.features)),
-            weights,
+    for index, membership in enumerate(student_memberships):
+        ref = ref_for_index(index)
+        member_by_ref[ref] = membership
+
+        feature_row = feature_by_user.get(membership.user_id)
+        features = (
+            dict(feature_row.features)
+            if feature_row is not None
+            else {col: 0.0 for col in ML_FEATURE_COLUMNS}
         )
-    return scores
+
+        contribution = contribution_by_user.get(membership.user_id)
+        raw_github = (
+            contribution.github.model_dump()
+            if contribution and contribution.github
+            else None
+        )
+        raw_docs = (
+            contribution.google_docs.model_dump()
+            if contribution and contribution.google_docs
+            else None
+        )
+        meeting = (
+            contribution.meeting_engagement.model_dump()
+            if contribution and contribution.meeting_engagement
+            else None
+        )
+        github_connected = bool(contribution.github_connected) if contribution else False
+        google_connected = bool(contribution.google_connected) if contribution else False
+        google_matched = contribution.google_email_matched if contribution else None
+        account_status = (
+            contribution.account_status.value
+            if contribution and contribution.account_status is not None
+            else None
+        )
+
+        llm_members.append(
+            MemberScoringInput(
+                ref=ref,
+                features=features,
+                raw_github=raw_github,
+                raw_google_docs=raw_docs,
+                meeting=meeting,
+                github_connected=github_connected,
+                google_connected=google_connected,
+                google_email_matched=google_matched,
+                account_status=account_status,
+            )
+        )
+
+    group_input = GroupScoringInput(
+        assignment_description=assignment_description,
+        member_count=len(student_memberships),
+        group_totals=group_totals,
+        members=llm_members,
+    )
+    return group_input, member_by_ref
 
 
 async def _require_synced_participation(group: ProjectGroup, db: AsyncSession) -> None:
@@ -380,25 +386,47 @@ async def _snapshots_include_google_docs(group: ProjectGroup, db: AsyncSession) 
 
 async def report_delivery_readiness(
     group: ProjectGroup, db: AsyncSession
-) -> tuple[bool, list[str]]:
-    """True when linked integrations are synced and participation scores are current."""
+) -> tuple[bool, list[str], list[str]]:
+    """Report is ready once participation is synced and scores are current.
+
+    A linked GitHub repo / Google Doc that matched no group members only blocks
+    delivery *before* the first sync has run. Once a sync pass has completed but
+    still matched nobody (e.g. commit-author emails don't match member emails),
+    it is surfaced as a warning instead of blocking the report indefinitely.
+    """
     blockers: list[str] = []
+    warnings: list[str] = []
     last_synced_at = await _latest_snapshot_sync_at(group, db)
-    if last_synced_at is None:
+    has_synced = last_synced_at is not None
+    if not has_synced:
         blockers.append("participation_not_synced")
 
     if not await _snapshots_include_github(group, db):
-        blockers.append("github_not_synced")
+        if has_synced:
+            warnings.append(
+                "A GitHub repository is linked but no commits could be matched to "
+                "group members. This usually happens when the emails used to list "
+                "the members don't match the GitHub commit-author emails. "
+                "Continuing without GitHub contribution data."
+            )
+        else:
+            blockers.append("github_not_synced")
 
     if not await _snapshots_include_google_docs(group, db):
-        blockers.append("google_docs_not_synced")
+        if has_synced:
+            warnings.append(
+                "A Google Doc is linked but no edits could be matched to group "
+                "members. Continuing without Google Docs contribution data."
+            )
+        else:
+            blockers.append("google_docs_not_synced")
 
     if group.participation_scores_generated_at is None:
         blockers.append("scores_not_generated")
     elif _participation_scores_are_stale(group, last_synced_at):
         blockers.append("scores_stale")
 
-    return len(blockers) == 0, blockers
+    return len(blockers) == 0, blockers, warnings
 
 
 async def maybe_regenerate_scores_after_sync(
@@ -409,26 +437,6 @@ async def maybe_regenerate_scores_after_sync(
     warnings: list[str] = []
     last_synced_at = await _latest_snapshot_sync_at(group, db)
     is_stale = _participation_scores_are_stale(group, last_synced_at)
-
-    # #region agent log
-    _agent_debug_log(
-        location="participation_scoring.py:maybe_regenerate_scores_after_sync",
-        message="stale_check",
-        data={
-            "group_id": group.id,
-            "scores_generated_at": (
-                group.participation_scores_generated_at.isoformat()
-                if group.participation_scores_generated_at
-                else None
-            ),
-            "last_synced_at": (
-                last_synced_at.isoformat() if last_synced_at else None
-            ),
-            "is_stale": is_stale,
-        },
-        hypothesis_id="A",
-    )
-    # #endregion
 
     if not is_stale:
         return warnings
@@ -441,19 +449,6 @@ async def maybe_regenerate_scores_after_sync(
 
         await refresh_contribution_report_cache(group, db)
         warnings.extend(summary.warnings)
-        # #region agent log
-        _agent_debug_log(
-            location="participation_scoring.py:maybe_regenerate_scores_after_sync",
-            message="regenerated_scores",
-            data={
-                "group_id": group.id,
-                "new_generated_at": summary.generated_at.isoformat(),
-                "score_count": len(summary.scores),
-            },
-            hypothesis_id="A",
-            run_id="post-fix",
-        )
-        # #endregion
     except HTTPException as exc:
         warnings.append(str(exc.detail))
     except Exception:
@@ -505,6 +500,7 @@ async def _load_existing_scores(
                 contributor_tier=row.contributor_tier,
                 features=dict(row.features or {}),
                 generated_at=row.generated_at,
+                llm_rationale=dict(row.llm_rationale) if row.llm_rationale else None,
             )
             for row in rows
         ],
@@ -548,6 +544,165 @@ async def _append_dataset_rows(
     db.add(group)
 
 
+# ---------------------------------------------------------------------------
+# Terminal debug output (toggle with SCORING_DEBUG in .env)
+# ---------------------------------------------------------------------------
+class _C:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    CYAN = "\033[96m"
+    YELLOW = "\033[93m"
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    MAGENTA = "\033[95m"
+    BLUE = "\033[94m"
+    GREY = "\033[90m"
+
+
+_TIER_COLOR = {
+    "strong": _C.GREEN,
+    "average": _C.YELLOW,
+    "below": _C.RED,
+}
+_BOX_WIDTH = 74
+
+
+def _rule(label: str = "") -> str:
+    if not label:
+        return _C.GREY + "─" * _BOX_WIDTH + _C.RESET
+    prefix = f"── {label} "
+    pad = max(0, _BOX_WIDTH - len(prefix))
+    return _C.YELLOW + _C.BOLD + prefix + _C.GREY + "─" * pad + _C.RESET
+
+
+def _fmt_features(features: dict[str, float]) -> str:
+    parts = [
+        f"{key}={value:.3f}"
+        for key, value in features.items()
+        if isinstance(value, (int, float))
+    ]
+    return ", ".join(parts)
+
+
+def _print_scoring_debug(
+    *,
+    group: ProjectGroup,
+    group_input: GroupScoringInput,
+    member_by_ref: dict[str, GroupMembership],
+    llm_output,
+    summary: ParticipationScoresSummary,
+) -> None:
+    if not get_settings().SCORING_DEBUG:
+        return
+
+    ref_to_userid = {ref: m.user_id for ref, m in member_by_ref.items()}
+    ref_to_name = {
+        ref: (m.user.name or m.user.email) for ref, m in member_by_ref.items()
+    }
+    score_by_userid = {s.user_id: s for s in summary.scores}
+    output_by_ref = {m.ref: m for m in llm_output.members}
+
+    lines: list[str] = []
+    lines.append("")
+    title = f"ML PARTICIPATION SCORING  ·  {group.group_name or group.id}"
+    lines.append(_C.CYAN + _C.BOLD + "╔" + "═" * _BOX_WIDTH + "╗" + _C.RESET)
+    lines.append(
+        _C.CYAN + _C.BOLD + "║ " + title.ljust(_BOX_WIDTH - 1) + "║" + _C.RESET
+    )
+    lines.append(_C.CYAN + _C.BOLD + "╚" + "═" * _BOX_WIDTH + "╝" + _C.RESET)
+
+    # --- LLM input ---
+    lines.append(_rule("LLM INPUT"))
+    desc = group_input.assignment_description or "(none)"
+    lines.append(
+        f"{_C.BOLD}Assignment:{_C.RESET} "
+        + textwrap.shorten(desc.replace("\n", " "), width=90, placeholder=" …")
+    )
+    lines.append(
+        f"{_C.BOLD}Members:{_C.RESET} {group_input.member_count}   "
+        f"{_C.BOLD}Group totals:{_C.RESET} {_C.DIM}{group_input.group_totals}{_C.RESET}"
+    )
+    for member in group_input.members:
+        name = ref_to_name.get(member.ref, "?")
+        lines.append(f"  {_C.GREEN}{_C.BOLD}{member.ref}{_C.RESET} ({name})")
+        lines.append(f"    {_C.DIM}shares:{_C.RESET} {_fmt_features(member.features)}")
+        lines.append(
+            f"    {_C.DIM}github:{_C.RESET} {member.raw_github}  "
+            f"{_C.DIM}docs:{_C.RESET} {member.raw_google_docs}"
+        )
+        lines.append(f"    {_C.DIM}meeting:{_C.RESET} {member.meeting}")
+        lines.append(
+            f"    {_C.DIM}connected:{_C.RESET} github={member.github_connected} "
+            f"google={member.google_connected} matched={member.google_email_matched} "
+            f"account={member.account_status}"
+        )
+
+    # --- LLM output ---
+    lines.append(_rule(f"LLM OUTPUT  (model={llm_output.model_version or 'n/a'})"))
+    for ref, membership in member_by_ref.items():
+        result = output_by_ref.get(ref)
+        if result is None:
+            continue
+        name = ref_to_name.get(ref, "?")
+        tier = _classify_score(result.score)
+        tier_color = _TIER_COLOR.get(tier, _C.RESET)
+        lines.append(
+            f"  {_C.GREEN}{_C.BOLD}{ref}{_C.RESET} ({name})  "
+            f"{tier_color}{_C.BOLD}score={result.score:.3f} [{tier}]{_C.RESET}  "
+            f"{_C.DIM}confidence={result.confidence:.2f}{_C.RESET}"
+        )
+        lines.append(f"    {_C.DIM}top_area:{_C.RESET} {result.top_area}")
+        if result.flags:
+            lines.append(
+                f"    {_C.MAGENTA}flags:{_C.RESET} {_C.MAGENTA}{result.flags}{_C.RESET}"
+            )
+        reasoning = result.reasoning or "(none)"
+        wrapped = textwrap.wrap(reasoning, width=_BOX_WIDTH - 6) or ["(none)"]
+        lines.append(f"    {_C.DIM}reasoning:{_C.RESET}")
+        for wline in wrapped:
+            lines.append(f"      {_C.DIM}{wline}{_C.RESET}")
+    if llm_output.group_observations:
+        lines.append(f"  {_C.BLUE}{_C.BOLD}Group observations:{_C.RESET}")
+        for wline in textwrap.wrap(llm_output.group_observations, width=_BOX_WIDTH - 4):
+            lines.append(f"    {_C.BLUE}{wline}{_C.RESET}")
+
+    # --- ML enrichment (Isolation Forest + KMeans) ---
+    lines.append(_rule("ML ENRICHMENT"))
+    if summary.team_archetype is not None:
+        ta = summary.team_archetype
+        lines.append(
+            f"  {_C.BOLD}Team archetype:{_C.RESET} "
+            f"{_C.CYAN}{ta.archetype_label}{_C.RESET} "
+            f"{_C.DIM}(cluster {ta.cluster_id}, {ta.archetype}){_C.RESET}"
+        )
+    else:
+        lines.append(f"  {_C.DIM}Team archetype: unavailable{_C.RESET}")
+    for ref, membership in member_by_ref.items():
+        score = score_by_userid.get(ref_to_userid.get(ref))
+        if score is None:
+            continue
+        name = ref_to_name.get(ref, "?")
+        outlier = score.outlier
+        if outlier is None:
+            lines.append(f"  {ref} ({name}): {_C.DIM}outlier model unavailable{_C.RESET}")
+            continue
+        flag = (
+            f"{_C.RED}{_C.BOLD}OUTLIER{_C.RESET}"
+            if outlier.is_outlier
+            else f"{_C.GREEN}typical{_C.RESET}"
+        )
+        lines.append(
+            f"  {ref} ({name}): {flag}  "
+            f"{_C.DIM}type={outlier.outlier_type} "
+            f"anomaly={outlier.anomaly_score:.3f}{_C.RESET}"
+        )
+
+    lines.append(_C.CYAN + _C.BOLD + "═" * (_BOX_WIDTH + 2) + _C.RESET)
+    lines.append("")
+    print("\n".join(lines), flush=True)
+
+
 async def generate_participation_scores(
     group: ProjectGroup,
     db: AsyncSession,
@@ -586,57 +741,84 @@ async def generate_participation_scores(
             detail="No student members found in this group.",
         )
 
+    if not is_llm_scoring_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Participation scoring is unavailable: the Gemini API is not "
+                "configured. Set GEMINI_API_KEY and try again."
+            ),
+        )
+
     feature_rows = compute_member_features_from_contributions(contributions)
     feature_by_user = {row.user_id: row for row in feature_rows}
-    student_user_ids = {membership.user_id for membership in student_memberships}
-    rule_based_scores = await _rule_based_scores_by_user(
-        group, contributions, student_user_ids, db
+
+    session_count, speaking_total, chat_total = await _meeting_activity_totals(
+        group, db
+    )
+    group_totals = build_group_activity_totals(
+        contributions.members,
+        total_meeting_sessions=session_count,
+        total_speaking_turns=speaking_total,
+        total_chat_messages=chat_total,
+    )
+    assignment_description = await _load_assignment_description(group, db)
+
+    group_input, member_by_ref = _build_llm_group_input(
+        assignment_description=assignment_description,
+        student_memberships=student_memberships,
+        contributions=contributions,
+        feature_by_user=feature_by_user,
+        group_totals=group_totals,
     )
 
-    last_synced_at = await _latest_snapshot_sync_at(group, db)
-    total_commits = sum(
-        float(row.features.get("code_commits", 0.0)) for row in feature_rows
-    )
-    # #region agent log
-    _agent_debug_log(
-        location="participation_scoring.py:generate_participation_scores",
-        message="score_generation_inputs",
-        data={
-            "group_id": group.id,
-            "allow_regenerate": allow_regenerate,
-            "scores_generated_at": (
-                group.participation_scores_generated_at.isoformat()
-                if group.participation_scores_generated_at
-                else None
+    try:
+        llm_output = await score_group(group_input)
+    except LLMScoringUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Participation scoring is unavailable: {exc}",
+        ) from exc
+    except LLMScoringError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "The scoring model could not produce results. Please try again. "
+                f"({exc})"
             ),
-            "last_synced_at": (
-                last_synced_at.isoformat() if last_synced_at else None
-            ),
-            "total_code_commits": total_commits,
-            "member_count": len(student_memberships),
-        },
-        hypothesis_id="B",
-    )
-    # #endregion
+        ) from exc
+
+    output_by_ref = {member.ref: member for member in llm_output.members}
 
     generated_at = datetime.now(timezone.utc)
     score_results: list[ParticipationScoreResult] = []
-    score_by_user_id: dict[str, ParticipationScoreResult] = {}
-    used_ml = False
 
-    for membership in student_memberships:
+    for index, membership in enumerate(student_memberships):
+        ref = ref_for_index(index)
+        member_result = output_by_ref.get(ref)
+        if member_result is None:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="The scoring model returned incomplete results. Please retry.",
+            )
+
         feature_row = feature_by_user.get(membership.user_id)
-        if feature_row is None:
-            features = {col: 0.0 for col in ML_FEATURE_COLUMNS}
-        else:
-            features = dict(feature_row.features)
-
-        rule_score = rule_based_scores.get(membership.user_id, 0.0)
-        predicted, member_used_ml = _predict_member_score(
-            features, rule_based_score=rule_score
+        features = (
+            dict(feature_row.features)
+            if feature_row is not None
+            else {col: 0.0 for col in ML_FEATURE_COLUMNS}
         )
-        used_ml = used_ml or member_used_ml
+        predicted = member_result.score
         tier = _classify_score(predicted)
+        rationale = {
+            "reasoning": member_result.reasoning,
+            "top_area": member_result.top_area,
+            "flags": member_result.flags,
+            "confidence": member_result.confidence,
+            "group_observations": llm_output.group_observations,
+            "model_version": llm_output.model_version,
+        }
+
         result = ParticipationScoreResult(
             user_id=membership.user_id,
             name=membership.user.name,
@@ -644,9 +826,9 @@ async def generate_participation_scores(
             contributor_tier=tier,
             features=features,
             generated_at=generated_at,
+            llm_rationale=rationale,
         )
         score_results.append(result)
-        score_by_user_id[membership.user_id] = result
 
         db.add(
             MemberParticipationScore(
@@ -655,32 +837,16 @@ async def generate_participation_scores(
                 predicted_score=predicted,
                 contributor_tier=tier,
                 features=features,
+                llm_rationale=rationale,
                 generated_at=generated_at,
             )
         )
-
-    if not used_ml:
-        warnings.append(
-            "ML model unavailable; participation scores used rule-based weighting."
-        )
-
-    student_id_by_user_id = {
-        membership.user_id: str(index + 1)
-        for index, membership in enumerate(student_memberships)
-    }
-
-    await _append_dataset_rows(
-        group=group,
-        db=db,
-        score_by_user_id=score_by_user_id,
-        student_id_by_user_id=student_id_by_user_id,
-    )
 
     group.participation_scores_generated_at = generated_at
     db.add(group)
     await db.flush()
 
-    return enrich_scores_summary_with_ml_insights(
+    enriched = enrich_scores_summary_with_ml_insights(
         ParticipationScoresSummary(
             group_id=group.id,
             generated_at=generated_at,
@@ -688,6 +854,14 @@ async def generate_participation_scores(
             warnings=warnings,
         )
     )
+    _print_scoring_debug(
+        group=group,
+        group_input=group_input,
+        member_by_ref=member_by_ref,
+        llm_output=llm_output,
+        summary=enriched,
+    )
+    return enriched
 
 
 async def get_participation_scores_for_group(
@@ -750,6 +924,7 @@ async def get_member_participation_score(
         features=dict(row.features or {}),
         generated_at=row.generated_at,
         outlier=_detect_outlier_for_features(dict(row.features or {})),
+        llm_rationale=dict(row.llm_rationale) if row.llm_rationale else None,
     )
     return result
 
@@ -767,20 +942,6 @@ async def try_generate_participation_scores_for_report(
         await _require_synced_participation(group, db)
     except HTTPException as exc:
         warnings.append(str(exc.detail))
-        return warnings
-
-    if not await _snapshots_include_github(group, db):
-        warnings.append(
-            "GitHub data not yet synced; deferring participation score generation."
-        )
-        # #region agent log
-        _agent_debug_log(
-            location="participation_scoring.py:try_generate_participation_scores_for_report",
-            message="deferred_github_missing",
-            data={"group_id": group.id},
-            hypothesis_id="C",
-        )
-        # #endregion
         return warnings
 
     try:

@@ -87,10 +87,14 @@ async def recalculate_group_engagement(
 
             sessions_attended += 1
 
-            duration = session_duration[session.id]
+            duration = session_duration[session.id] or 0
             if duration > 0:
                 ratio = min(user_metric.duration_minutes / duration, 1.0)
                 attendance_ratios.append(ratio)
+            else:
+                # No session duration recorded; presence alone counts as
+                # full attendance for this session.
+                attendance_ratios.append(1.0)
 
             total_speaking = sum(metric.speaking_turns for metric in session_metrics)
             if total_speaking > 0 and user_metric.speaking_turns > 0:
@@ -108,8 +112,10 @@ async def recalculate_group_engagement(
             score = EngagementScore(group_id=group_id, user_id=user_id)
             db.add(score)
 
+        # Averaged over all completed sessions so missed meetings lower the
+        # ratio instead of being ignored.
         score.attendance_ratio = (
-            sum(attendance_ratios) / len(attendance_ratios) if attendance_ratios else 0.0
+            sum(attendance_ratios) / total_sessions if total_sessions else 0.0
         )
         score.speaking_ratio = (
             sum(speaking_ratios) / len(speaking_ratios) if speaking_ratios else 0.0

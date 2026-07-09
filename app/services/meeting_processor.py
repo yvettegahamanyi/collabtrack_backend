@@ -20,6 +20,7 @@ from app.services.engagement_calculator import recalculate_group_engagement
 from app.services.meeting_parser import (
     AttendanceRecord,
     MeetingParseError,
+    last_timestamp_minutes,
     parse_attendance_csv,
     parse_transcript_or_chat,
     unique_display_names,
@@ -73,31 +74,32 @@ async def _process_session(
     session: MeetingSession, group_id: str, db: AsyncSession
 ) -> None:
     files_by_type = {record.file_type: record for record in session.files}
-    required = (
-        MeetingFileType.ATTENDANCE,
-        MeetingFileType.TRANSCRIPT,
-    )
-    missing = [file_type for file_type in required if file_type not in files_by_type]
-    if missing:
+    if MeetingFileType.TRANSCRIPT not in files_by_type:
         session.status = MeetingSessionStatus.FAILED
-        session.error_message = "Attendance and transcript files must be uploaded before processing."
+        session.error_message = "A transcript file must be uploaded before processing."
         db.add(session)
         return
 
     try:
-        attendance_content = _read_file(
-            files_by_type[MeetingFileType.ATTENDANCE].storage_path
-        )
         transcript_content = _read_file(
             files_by_type[MeetingFileType.TRANSCRIPT].storage_path
         )
+        attendance_content = ""
+        if MeetingFileType.ATTENDANCE in files_by_type:
+            attendance_content = _read_file(
+                files_by_type[MeetingFileType.ATTENDANCE].storage_path
+            )
         chat_content = ""
         if MeetingFileType.CHAT in files_by_type:
             chat_content = _read_file(
                 files_by_type[MeetingFileType.CHAT].storage_path
             )
 
-        attendance = parse_attendance_csv(attendance_content)
+        attendance = (
+            parse_attendance_csv(attendance_content)
+            if attendance_content.strip()
+            else {}
+        )
         speaking = parse_transcript_or_chat(transcript_content, label="Transcript")
         chat = (
             parse_transcript_or_chat(chat_content, label="Chat")
@@ -115,6 +117,13 @@ async def _process_session(
         db.add(session)
         return
 
+    if session.duration_minutes is None:
+        derived_duration = max(
+            last_timestamp_minutes(transcript_content),
+            last_timestamp_minutes(chat_content) if chat_content.strip() else 0,
+        )
+        session.duration_minutes = max(derived_duration, 1)
+
     all_names = unique_display_names(attendance, speaking, chat)
     name_to_user_id, unmapped = await _resolve_names(
         group_id, all_names, db, attendance=attendance
@@ -131,6 +140,7 @@ async def _process_session(
         speaking=speaking,
         chat=chat,
         name_to_user_id=name_to_user_id,
+        session_duration_minutes=session.duration_minutes,
     )
 
     await db.execute(
@@ -209,9 +219,12 @@ async def _resolve_names(
         .options(selectinload(GroupMembership.user))
     )
     user_id_by_email: dict[str, str] = {}
+    user_id_by_name: dict[str, str] = {}
     for membership in memberships.all():
         user = membership.user
         user_id_by_email[user.email.lower()] = user.id
+        if user.name:
+            user_id_by_name[user.name.strip().lower()] = user.id
 
     training_meet_emails = await _training_meet_email_map(group_id, db)
     user_id_by_email.update(training_meet_emails)
@@ -233,6 +246,11 @@ async def _resolve_names(
             if user_id:
                 resolved[display_name] = user_id
                 return True
+
+        user_id = user_id_by_name.get(display_name.strip().lower())
+        if user_id:
+            resolved[display_name] = user_id
+            return True
 
         return False
 
@@ -260,6 +278,11 @@ async def _resolve_names(
             resolved[display_name] = resolved[alias_source]
             continue
 
+        user_id = user_id_by_name.get(lower)
+        if user_id:
+            resolved[display_name] = user_id
+            continue
+
         unmapped.add(display_name)
 
     return resolved, unmapped
@@ -271,6 +294,7 @@ def _build_raw_metrics(
     speaking: dict[str, int],
     chat: dict[str, int],
     name_to_user_id: dict[str, str],
+    session_duration_minutes: int | None = None,
 ) -> dict[str, dict]:
     metrics: dict[str, dict] = {}
 
@@ -299,5 +323,13 @@ def _build_raw_metrics(
     for display_name, messages in chat.items():
         user_id = name_to_user_id[display_name]
         ensure_user(user_id)["chat_messages"] += messages
+
+    if not attendance:
+        # No attendance CSV: whoever spoke or chatted counts as present for
+        # the whole session.
+        presumed_duration = session_duration_minutes or 1
+        for entry in metrics.values():
+            if entry["speaking_turns"] > 0 or entry["chat_messages"] > 0:
+                entry["duration_minutes"] = presumed_duration
 
     return metrics

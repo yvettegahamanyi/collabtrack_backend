@@ -70,13 +70,62 @@ def _send_email_sync(*, to_email: str, subject: str, body: str) -> None:
     message["Subject"] = subject
     message.set_content(body)
 
-    with smtplib.SMTP(smtp.host, smtp.port) as server:
-        server.starttls()
-        server.login(smtp.user, smtp.password)
-        server.send_message(message)
+    try:
+        with smtplib.SMTP(smtp.host, smtp.port, timeout=30) as server:
+            server.starttls()
+            server.login(smtp.user, smtp.password)
+            server.send_message(message)
+        logger.info(
+            "Email sent to %s via %s:%s", to_email, smtp.host, smtp.port
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send email to %s via %s:%s",
+            to_email,
+            smtp.host,
+            smtp.port,
+        )
+        raise
+
+
+async def _send_email_via_resend(
+    *, api_key: str, to_email: str, subject: str, body: str
+) -> None:
+    import httpx
+
+    smtp = _load_smtp_config()
+    from_email = os.getenv("RESEND_FROM_EMAIL", "").strip() or smtp.from_email
+    payload = {
+        "from": from_email,
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+            )
+        resp.raise_for_status()
+        logger.info("Email sent to %s via Resend API", to_email)
+    except Exception:
+        logger.exception("Failed to send email to %s via Resend API", to_email)
+        raise
 
 
 async def send_email(*, to_email: str, subject: str, body: str) -> None:
+    resend_api_key = os.getenv("RESEND_API_KEY", "").strip()
+    if resend_api_key:
+        await _send_email_via_resend(
+            api_key=resend_api_key,
+            to_email=to_email,
+            subject=subject,
+            body=body,
+        )
+        return
+
     await asyncio.to_thread(
         _send_email_sync,
         to_email=to_email,

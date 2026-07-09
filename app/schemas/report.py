@@ -1,20 +1,23 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.models import ContributionReportStatus, ReportStatus
 from app.schemas.participation import ContributionsOut
 
 
-class AttendanceMemberPreview(BaseModel):
+class MemberPreview(BaseModel):
     name: str
     email: str
-    duration_minutes: int
-    was_facilitator: bool
 
 
-class AttendancePreviewOut(BaseModel):
-    members: list[AttendanceMemberPreview]
+class MembersPreviewOut(BaseModel):
+    members: list[MemberPreview]
+
+
+class ReportMemberInput(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    email: EmailStr
 
 
 class MeetingInputMeta(BaseModel):

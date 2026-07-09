@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import HTTPException, UploadFile, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -63,21 +63,33 @@ async def create_meeting_session(
     user: User,
     db: AsyncSession,
 ) -> MeetingSession:
-    existing = await db.scalar(
-        select(MeetingSession).where(
-            MeetingSession.group_id == group.id,
-            MeetingSession.session_date == payload.session_date,
+    if payload.session_date is not None:
+        existing = await db.scalar(
+            select(MeetingSession).where(
+                MeetingSession.group_id == group.id,
+                MeetingSession.session_date == payload.session_date,
+            )
         )
-    )
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A meeting session already exists for this date.",
-        )
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A meeting session already exists for this date.",
+            )
+
+    session_label = (payload.session_label or "").strip()
+    if not session_label:
+        session_count = (
+            await db.scalar(
+                select(func.count())
+                .select_from(MeetingSession)
+                .where(MeetingSession.group_id == group.id)
+            )
+        ) or 0
+        session_label = f"Meeting {session_count + 1}"
 
     session = MeetingSession(
         group_id=group.id,
-        session_label=payload.session_label,
+        session_label=session_label,
         session_date=payload.session_date,
         duration_minutes=payload.duration_minutes,
         status=MeetingSessionStatus.PENDING,
@@ -94,7 +106,10 @@ async def list_meeting_sessions(
     sessions = await db.scalars(
         select(MeetingSession)
         .where(MeetingSession.group_id == group_id)
-        .order_by(MeetingSession.session_date.desc())
+        .order_by(
+            MeetingSession.session_date.desc().nulls_last(),
+            MeetingSession.uploaded_at.desc().nulls_last(),
+        )
     )
     return [serialize_session(session) for session in sessions.all()]
 
@@ -128,8 +143,8 @@ async def _process_and_refresh_session(
 async def upload_meeting_files(
     session: MeetingSession,
     *,
-    attendance_file: UploadFile,
     transcript_file: UploadFile,
+    attendance_file: UploadFile | None = None,
     chat_file: UploadFile | None = None,
     user: User,
     db: AsyncSession,
@@ -146,9 +161,10 @@ async def upload_meeting_files(
         )
 
     uploads: list[tuple[UploadFile, MeetingFileType, str]] = [
-        (attendance_file, MeetingFileType.ATTENDANCE, ".csv"),
         (transcript_file, MeetingFileType.TRANSCRIPT, ".txt"),
     ]
+    if attendance_file is not None and (attendance_file.filename or "").strip():
+        uploads.append((attendance_file, MeetingFileType.ATTENDANCE, ".csv"))
     if chat_file is not None and (chat_file.filename or "").strip():
         uploads.append((chat_file, MeetingFileType.CHAT, ".txt"))
 

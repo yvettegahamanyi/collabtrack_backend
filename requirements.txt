@@ -18,3 +18,4 @@ pydantic-settings
 joblib
 scikit-learn==1.6.1
 numpy
+google-genai

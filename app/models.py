@@ -385,6 +385,7 @@ class MemberParticipationScore(Base):
     predicted_score: Mapped[float] = mapped_column(Float)
     contributor_tier: Mapped[str] = mapped_column(String)
     features: Mapped[dict] = mapped_column(JSON, default=dict)
+    llm_rationale: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -537,8 +538,8 @@ class MeetingSession(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
     group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
     session_label: Mapped[str] = mapped_column(String)
-    session_date: Mapped[date] = mapped_column(Date)
-    duration_minutes: Mapped[int] = mapped_column(Integer)
+    session_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[MeetingSessionStatus] = mapped_column(
         SAEnum(MeetingSessionStatus),
         default=MeetingSessionStatus.PENDING,

@@ -14,9 +14,9 @@ from app.schemas.assignment import (
 from app.schemas.report import (
     AssignmentReportDetailOut,
     AssignmentReportOut,
-    AttendanceMemberPreview,
-    AttendancePreviewOut,
     CreateReportOut,
+    MemberPreview,
+    MembersPreviewOut,
 )
 from app.schemas.response import ApiResponse, success
 from app.services.assignments import serialize_assignment_reports
@@ -32,12 +32,12 @@ from app.services.contribution_report import (
     resend_supervisor_notification,
 )
 from app.services.groups import get_group_or_404
-from app.services.meeting_parser import MeetingParseError, parse_attendance_members
+from app.services.meeting_parser import MeetingParseError, parse_member_list
 from app.services.participation import get_contributions
 from app.services.report_creation import (
     MeetingFilePayload,
     bootstrap_assignment_report,
-    parse_meetings_meta,
+    parse_members_payload,
     parse_url_list,
     process_assignment_report_meetings,
 )
@@ -155,19 +155,19 @@ async def delete_assignment(
 
 
 @router.post(
-    "/assignments/{assignment_id}/reports/preview-attendance",
-    response_model=ApiResponse[AttendancePreviewOut],
+    "/assignments/{assignment_id}/reports/preview-members",
+    response_model=ApiResponse[MembersPreviewOut],
 )
-async def preview_attendance(
+async def preview_members(
     assignment_id: str,
-    attendance_file: UploadFile = File(...),
+    members_file: UploadFile = File(...),
     current_user: User = Depends(get_current_instructor),
     db: AsyncSession = Depends(get_db),
 ):
     await require_assignment_owner(assignment_id, current_user, db)
-    content = (await attendance_file.read()).decode("utf-8")
+    content = (await members_file.read()).decode("utf-8")
     try:
-        rows = parse_attendance_members(content)
+        rows = parse_member_list(content)
     except MeetingParseError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -175,18 +175,12 @@ async def preview_attendance(
         ) from exc
 
     return success(
-        data=AttendancePreviewOut(
+        data=MembersPreviewOut(
             members=[
-                AttendanceMemberPreview(
-                    name=row.name,
-                    email=row.email,
-                    duration_minutes=row.duration_minutes,
-                    was_facilitator=row.was_facilitator,
-                )
-                for row in rows
+                MemberPreview(name=row.name, email=row.email) for row in rows
             ]
         ),
-        message="Attendance parsed successfully.",
+        message="Member list parsed successfully.",
     )
 
 
@@ -205,19 +199,18 @@ async def create_report(
     await require_assignment_owner(assignment_id, current_user, db)
 
     form = await request.form()
-    attendance = form.get("attendance_file")
-    if not isinstance(attendance, StarletteUploadFile):
+    members_raw = form.get("members")
+    members = parse_members_payload(
+        members_raw if isinstance(members_raw, str) else None
+    )
+    if not members:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="attendance_file is required.",
+            detail="Add at least one group member.",
         )
 
     github_raw = form.get("github_urls")
     google_raw = form.get("google_doc_urls")
-    meetings_raw = form.get("meetings")
-    meetings_meta = parse_meetings_meta(
-        meetings_raw if isinstance(meetings_raw, str) else None
-    )
     github_list = parse_url_list(
         github_raw if isinstance(github_raw, str) else None
     )
@@ -226,32 +219,36 @@ async def create_report(
     )
 
     meeting_payloads: list[MeetingFilePayload] = []
-    for index, meta in enumerate(meetings_meta):
-        att = form.get(f"meeting_{index}_attendance")
+    index = 0
+    while True:
         trans = form.get(f"meeting_{index}_transcript")
         chat = form.get(f"meeting_{index}_chat")
-        if not isinstance(att, StarletteUploadFile) or not isinstance(trans, StarletteUploadFile) or not isinstance(chat, StarletteUploadFile):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Meeting {index + 1} requires attendance, transcript, and chat files.",
-            )
+        if not isinstance(trans, StarletteUploadFile):
+            if isinstance(chat, StarletteUploadFile):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Meeting {index + 1} requires a transcript file.",
+                )
+            break
+        chat_bytes = None
+        chat_filename = None
+        if isinstance(chat, StarletteUploadFile):
+            chat_bytes = await chat.read()
+            chat_filename = chat.filename or f"meeting_{index}_chat.txt"
         meeting_payloads.append(
             MeetingFilePayload(
-                meta=meta,
-                attendance=await att.read(),
                 transcript=await trans.read(),
-                chat=await chat.read(),
-                attendance_filename=att.filename or f"meeting_{index}_attendance.csv",
                 transcript_filename=trans.filename or f"meeting_{index}_transcript.txt",
-                chat_filename=chat.filename or f"meeting_{index}_chat.txt",
+                chat=chat_bytes,
+                chat_filename=chat_filename,
             )
         )
+        index += 1
 
-    attendance_content = await attendance.read()
     group, result = await bootstrap_assignment_report(
         assignment_id=assignment_id,
         instructor=current_user,
-        attendance_content=attendance_content,
+        members=members,
         github_urls=github_list,
         google_doc_urls=google_list,
         db=db,
