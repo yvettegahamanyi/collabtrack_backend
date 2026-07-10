@@ -25,6 +25,7 @@ from app.schemas.meetings import MeetingEngagementMetrics
 from app.schemas.participation import (
     ContributionsOut,
     GithubMetrics,
+    GithubSyncEvent,
     GoogleDocsMetrics,
     GoogleDocSyncEvent,
     MemberParticipationOut,
@@ -139,7 +140,7 @@ def _assign_github_metrics(
     github_result: GithubSyncResult,
     *,
     platform_identities: dict[str, PlatformIdentity] | None = None,
-) -> dict[str, GithubMetrics]:
+) -> tuple[dict[str, GithubMetrics], dict[str, list[GithubSyncEvent]]]:
     candidates: list[tuple[int, str, str]] = []
 
     for membership in member_list:
@@ -176,6 +177,7 @@ def _assign_github_metrics(
     assigned_users: set[str] = set()
     assigned_logins: set[str] = set()
     metrics_by_user: dict[str, GithubMetrics] = {}
+    events_by_user: dict[str, list[GithubSyncEvent]] = {}
 
     for score, user_id, login in candidates:
         if user_id in assigned_users:
@@ -187,6 +189,10 @@ def _assign_github_metrics(
             assigned_users.add(user_id)
             assigned_logins.add(email_key)
             metrics_by_user[user_id] = github_result.by_email[email_key]
+            events_by_user[user_id] = [
+                GithubSyncEvent(**event.to_dict())
+                for event in github_result.events_by_email.get(email_key, [])
+            ]
             continue
         if login in assigned_logins:
             continue
@@ -196,8 +202,12 @@ def _assign_github_metrics(
         assigned_users.add(user_id)
         assigned_logins.add(login)
         metrics_by_user[user_id] = metrics
+        events_by_user[user_id] = [
+            GithubSyncEvent(**event.to_dict())
+            for event in github_result.events_by_login.get(login, [])
+        ]
 
-    return metrics_by_user
+    return metrics_by_user, events_by_user
 
 
 def _student_memberships(
@@ -235,21 +245,35 @@ async def _contribution_report_member_cache(
 def _merge_member_metrics(
     *,
     github_metrics: GithubMetrics | None,
+    github_events: list[GithubSyncEvent],
     google_metrics: GoogleDocsMetrics | None,
     google_events: list[GoogleDocSyncEvent],
     meeting_engagement: MeetingEngagementMetrics | None,
     cached_member: dict | None,
 ) -> tuple[
     GithubMetrics | None,
+    list[GithubSyncEvent],
     GoogleDocsMetrics | None,
     list[GoogleDocSyncEvent],
     MeetingEngagementMetrics | None,
 ]:
     if cached_member is None:
-        return github_metrics, google_metrics, google_events, meeting_engagement
+        return (
+            github_metrics,
+            github_events,
+            google_metrics,
+            google_events,
+            meeting_engagement,
+        )
 
     if github_metrics is None and cached_member.get("github"):
         github_metrics = GithubMetrics(**cached_member["github"])
+    if not github_events and cached_member.get("github_events"):
+        github_events = [
+            GithubSyncEvent(**event)
+            for event in cached_member["github_events"]
+            if isinstance(event, dict)
+        ]
     if google_metrics is None and cached_member.get("google_docs"):
         google_metrics = GoogleDocsMetrics(**cached_member["google_docs"])
     if not google_events and cached_member.get("google_docs_events"):
@@ -263,7 +287,13 @@ def _merge_member_metrics(
             **cached_member["meeting_engagement"]
         )
 
-    return github_metrics, google_metrics, google_events, meeting_engagement
+    return (
+        github_metrics,
+        github_events,
+        google_metrics,
+        google_events,
+        meeting_engagement,
+    )
 
 
 def _google_doc_sync_warning(doc_title: str, doc_status) -> str:
@@ -593,7 +623,7 @@ async def sync_group_participation(
     synced_at = datetime.now(timezone.utc)
     members_synced = 0
 
-    github_metrics_by_user = _assign_github_metrics(
+    github_metrics_by_user, github_events_by_user = _assign_github_metrics(
         member_list,
         integrations_by_user,
         github_result,
@@ -614,8 +644,11 @@ async def sync_group_participation(
 
         metrics: dict = {}
         gh_metrics = github_metrics_by_user.get(user.id)
+        gh_events = github_events_by_user.get(user.id, [])
         if gh_metrics is not None:
             metrics["github"] = gh_metrics.model_dump()
+        if gh_events:
+            metrics["github_events"] = [event.model_dump() for event in gh_events]
 
         lookup_email = (
             identity.google_docs_email.lower()
@@ -699,11 +732,17 @@ async def get_contributions(
         snapshot = snapshot_by_user.get(user.id)
 
         github_metrics = None
+        github_events: list[GithubSyncEvent] = []
         google_metrics = None
         google_events: list[GoogleDocSyncEvent] = []
         if snapshot and snapshot.metrics:
             if "github" in snapshot.metrics:
                 github_metrics = GithubMetrics(**snapshot.metrics["github"])
+            if "github_events" in snapshot.metrics:
+                github_events = [
+                    GithubSyncEvent(**event)
+                    for event in snapshot.metrics["github_events"]
+                ]
             if "google_docs" in snapshot.metrics:
                 google_metrics = GoogleDocsMetrics(
                     **snapshot.metrics["google_docs"]
@@ -726,9 +765,10 @@ async def get_contributions(
                 total_sessions=engagement_score.total_sessions,
             )
 
-        github_metrics, google_metrics, google_events, meeting_engagement = (
+        github_metrics, github_events, google_metrics, google_events, meeting_engagement = (
             _merge_member_metrics(
                 github_metrics=github_metrics,
+                github_events=github_events,
                 google_metrics=google_metrics,
                 google_events=google_events,
                 meeting_engagement=meeting_engagement,
@@ -747,6 +787,7 @@ async def get_contributions(
                 github_login=gh.provider_login if gh else None,
                 google_email_matched=goog.email_matched if goog else None,
                 github=github_metrics,
+                github_events=github_events,
                 google_docs=google_metrics,
                 google_docs_events=google_events,
                 meeting_engagement=meeting_engagement,

@@ -32,6 +32,25 @@ class GoogleDocSyncEvent(BaseModel):
     timestamp: str | None = None
 
 
+class GithubSyncEvent(BaseModel):
+    """Single GitHub commit, PR, review, or comment attributed to a member."""
+
+    type: str  # commit | pr_created | pr_reviewed | comment
+    owner: str
+    repo: str
+    source_id: str | None = None
+    author_login: str | None = None
+    author_email: str | None = None
+    matched_login: str | None = None
+    matched_email: str | None = None
+    match_method: str | None = None
+    timestamp: str | None = None
+    message: str | None = None
+    additions: int | None = None
+    deletions: int | None = None
+    lines_changed: int | None = None
+
+
 class MemberParticipationOut(BaseModel):
     user_id: str
     name: str | None
@@ -42,6 +61,7 @@ class MemberParticipationOut(BaseModel):
     github_login: str | None = None
     google_email_matched: bool | None = None
     github: GithubMetrics | None = None
+    github_events: list[GithubSyncEvent] = Field(default_factory=list)
     google_docs: GoogleDocsMetrics | None = None
     google_docs_events: list[GoogleDocSyncEvent] = Field(default_factory=list)
     meeting_engagement: MeetingEngagementMetrics | None = None

@@ -38,6 +38,7 @@ class MemberScoringInput:
     ref: str  # anonymized label, e.g. "Member A"
     features: dict[str, float]
     raw_github: dict[str, int] | None
+    github_events: list[dict] | None
     raw_google_docs: dict[str, int] | None
     meeting: dict[str, float] | None
     github_connected: bool
@@ -106,12 +107,12 @@ a balanced team to score similarly high, or for a whole team to score low.
 3. IGNORE any feature whose group total is 0 (the group did not use that channel, \
 so do not penalize anyone for it). For example, do not lower a score for "no pull \
 requests reviewed" if nobody reviewed pull requests.
-4. A value of 0 does NOT necessarily mean the student did nothing. It may mean a \
-platform was not connected, an account was not activated, or their identity could \
-not be matched to the activity data. When 'connected' flags are false or an \
-account is not active, treat low numbers as a POSSIBLE DATA GAP and add the flag \
-"possible_data_issue" rather than assuming disengagement. Lower your confidence in \
-these cases.
+4. A value of 0 does NOT necessarily mean the student did nothing. Platform \
+connection status does not indicate a data gap — activity is captured from \
+linked repos and docs regardless of whether a student connected their account. \
+Do NOT add "possible_data_issue" based on github_connected or google_connected \
+alone. When google_email_matched is explicitly false, add "possible_data_issue" \
+because document activity could not be reliably attributed to this student.
 5. Do NOT infer or speculate about a student's intent, motivation, character, \
 effort, health, or personal circumstances. Never describe a student as lazy, \
 disengaged, or uncommitted. Describe only what the measured data shows, using \
@@ -144,15 +145,26 @@ it, and ROUND the score to exactly 2 decimal places.
 Step 5. Set top_area to the active feature where the member's value is highest \
 relative to the group; break ties by choosing the feature that appears first in \
 the feature glossary. Use null only when there is no measurable contribution.
-Step 6. Apply flags per the rules above, then set confidence: start at 0.9 when \
-all platforms are connected and matched, subtract 0.15 for each data-gap concern \
-(disconnected platform with zero activity, unmatched identity, or non-active \
-account), round to 2 decimal places, and never go below 0.5 (if the result is \
-lower, use exactly 0.5).
+Step 6. Apply flags per the rules above. Then set "confidence" as SCORING \
+confidence: how certain you are about the score you assigned (0..1). This \
+reflects whether the member's shares clearly fit one anchor band or sit \
+borderline between bands. It is NOT about data completeness, platform \
+connection, or attribution quality. Use these anchors:
+- 0.85-0.95: data clearly fits one band with little ambiguity.
+- 0.70-0.84: fits one band but some channels are mixed or near a boundary.
+- 0.55-0.69: borderline between two adjacent bands; score required judgment.
+- 0.50-0.54: very ambiguous; multiple bands could reasonably apply.
+Pick the exact value within the range that matches your reasoning, ROUND to \
+2 decimal places, and never go below 0.50.
 
 Write "reasoning" in 1-3 neutral sentences citing the specific numbers that \
-determined the band (e.g. "Commit share 0.55 vs fair share 0.25"). Do not add \
-commentary beyond the data.
+determined the band (e.g. "Commit share 0.55 vs fair share 0.25"). When \
+github_events are provided, assess commit substance by comparing lines_changed \
+per commit against the group average. If half or more of a member's commits \
+have lines_changed at or below 10% of the group's average lines per commit, \
+treat those commits as mostly trivial and move the score one band lower than \
+the share alone would suggest. If fewer than half are trivial, note the mixed \
+quality in reasoning but do not adjust the band.
 
 Allowed values for "flags": "possible_data_issue", "low_measured_activity", \
 "high_relative_contribution", "uneven_contribution", "single_member_group", \
@@ -178,7 +190,36 @@ def _feature_glossary() -> str:
         "- chat_participation_ratio: average share of chat messages in meetings\n"
         "- docs_contribution_share: share of the group's Google Docs edits\n"
         "- comment_activity: share of the group's Google Docs comments\n"
+        "\n"
+        "github_events: per-commit detail (message, lines_changed, additions, "
+        "deletions, timestamp) for qualitative context in reasoning only.\n"
     )
+
+
+def _serialize_github_events(events: list[dict] | None) -> list[dict] | None:
+    """Keep commit events only, strip identity fields, sort for stable prompts."""
+    if not events:
+        return None
+
+    commits = [event for event in events if event.get("type") == "commit"]
+    if not commits:
+        return None
+
+    serialized = [
+        {
+            "type": event.get("type"),
+            "message": event.get("message"),
+            "additions": event.get("additions"),
+            "deletions": event.get("deletions"),
+            "lines_changed": event.get("lines_changed"),
+            "timestamp": event.get("timestamp"),
+        }
+        for event in sorted(
+            commits,
+            key=lambda item: (item.get("timestamp") or "", item.get("message") or ""),
+        )
+    ]
+    return serialized
 
 
 def _round_numbers(value, ndigits: int = 4):
@@ -207,6 +248,7 @@ def _build_prompt(group_input: GroupScoringInput) -> str:
                 "ref": member.ref,
                 "contribution_shares": _round_numbers(member.features),
                 "raw_github": member.raw_github,
+                "github_events": _serialize_github_events(member.github_events),
                 "raw_google_docs": member.raw_google_docs,
                 "meeting_engagement": _round_numbers(member.meeting),
                 "data_status": {
@@ -347,8 +389,7 @@ def _to_output(
             top_area=result_by_ref[ref].top_area,
             reasoning=result_by_ref[ref].reasoning,
             flags=list(result_by_ref[ref].flags),
-            # Confidence is floored at 0.5: below that the score is not useful
-            # as decision support, so treat 0.5 as the minimum reportable value.
+            # Scoring confidence comes from the model (band-fit certainty).
             confidence=_clamp(result_by_ref[ref].confidence, low=0.5),
         )
         for ref in expected_refs

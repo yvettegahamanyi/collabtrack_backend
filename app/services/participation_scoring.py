@@ -257,6 +257,11 @@ def _build_llm_group_input(
             if contribution and contribution.github
             else None
         )
+        github_events = (
+            [event.model_dump() for event in contribution.github_events]
+            if contribution and contribution.github_events
+            else None
+        )
         raw_docs = (
             contribution.google_docs.model_dump()
             if contribution and contribution.google_docs
@@ -281,6 +286,7 @@ def _build_llm_group_input(
                 ref=ref,
                 features=features,
                 raw_github=raw_github,
+                github_events=github_events,
                 raw_google_docs=raw_docs,
                 meeting=meeting,
                 github_connected=github_connected,
@@ -629,6 +635,7 @@ def _print_scoring_debug(
         lines.append(f"    {_C.DIM}shares:{_C.RESET} {_fmt_features(member.features)}")
         lines.append(
             f"    {_C.DIM}github:{_C.RESET} {member.raw_github}  "
+            f"{_C.DIM}github_events:{_C.RESET} {len(member.github_events or [])} commits  "
             f"{_C.DIM}docs:{_C.RESET} {member.raw_google_docs}"
         )
         lines.append(f"    {_C.DIM}meeting:{_C.RESET} {member.meeting}")
