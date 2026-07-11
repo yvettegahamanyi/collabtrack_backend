@@ -55,6 +55,22 @@ def require_lti_configured() -> None:
         )
 
 
+def _normalize_pem(key: str, *, private: bool) -> str:
+    """Accept full PEM blocks or single-line base64 bodies from hosting env vars."""
+    normalized = key.replace("\\n", "\n").strip()
+    if "BEGIN" in normalized:
+        return normalized
+
+    body = "".join(normalized.split())
+    if not body:
+        return normalized
+
+    header = "-----BEGIN PRIVATE KEY-----" if private else "-----BEGIN PUBLIC KEY-----"
+    footer = "-----END PRIVATE KEY-----" if private else "-----END PUBLIC KEY-----"
+    wrapped = "\n".join(body[i : i + 64] for i in range(0, len(body), 64))
+    return f"{header}\n{wrapped}\n{footer}\n"
+
+
 def get_tool_config() -> ToolConfDict:
     require_lti_configured()
     deployment_ids = [MOODLE_DEPLOYMENT_ID] if MOODLE_DEPLOYMENT_ID else []
@@ -72,12 +88,12 @@ def get_tool_config() -> ToolConfDict:
     tool_conf = ToolConfDict(settings)
     tool_conf.set_private_key(
         MOODLE_PLATFORM_ISS,
-        LTI_TOOL_PRIVATE_KEY.replace("\\n", "\n"),
+        _normalize_pem(LTI_TOOL_PRIVATE_KEY, private=True),
         client_id=MOODLE_CLIENT_ID,
     )
     tool_conf.set_public_key(
         MOODLE_PLATFORM_ISS,
-        LTI_TOOL_PUBLIC_KEY.replace("\\n", "\n"),
+        _normalize_pem(LTI_TOOL_PUBLIC_KEY, private=False),
         client_id=MOODLE_CLIENT_ID,
     )
     return tool_conf
