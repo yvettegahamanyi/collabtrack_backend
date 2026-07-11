@@ -160,7 +160,7 @@ Pick the exact value within the range that matches your reasoning, ROUND to \
 Write "reasoning" in 1-3 neutral sentences citing the specific numbers that \
 determined the band (e.g. "Commit share 0.55 vs fair share 0.25"). When \
 github_events are provided, assess commit substance by comparing lines_changed \
-per commit against the group average. If half or more of a member's commits \
+per commit against the group average. If more than 90%   of a member's commits \
 have lines_changed at or below 10% of the group's average lines per commit, \
 treat those commits as mostly trivial and move the score one band lower than \
 the share alone would suggest. If fewer than half are trivial, note the mixed \

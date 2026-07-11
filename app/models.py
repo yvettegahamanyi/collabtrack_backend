@@ -154,6 +154,9 @@ class User(Base):
     provisioned_by_instructor_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id"), nullable=True
     )
+    moodle_lti_sub: Mapped[str | None] = mapped_column(
+        String, unique=True, index=True, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -701,6 +704,72 @@ class TrainingCollection(Base):
     members: Mapped[list["TrainingCollectionMember"]] = relationship(
         back_populates="collection", cascade="all, delete-orphan"
     )
+
+
+class MoodleCourseLink(Base):
+    __tablename__ = "moodle_course_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "moodle_issuer",
+            "moodle_course_id",
+            name="uq_moodle_course_issuer",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    class_id: Mapped[str] = mapped_column(ForeignKey("classes.id"), unique=True)
+    moodle_issuer: Mapped[str] = mapped_column(String)
+    moodle_course_id: Mapped[str] = mapped_column(String, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    course_class: Mapped["CourseClass"] = relationship()
+
+
+class MoodleActivityLink(Base):
+    __tablename__ = "moodle_activity_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "moodle_issuer",
+            "moodle_resource_link_id",
+            name="uq_moodle_activity_issuer",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    assignment_id: Mapped[str] = mapped_column(ForeignKey("assignments.id"), unique=True)
+    moodle_issuer: Mapped[str] = mapped_column(String)
+    moodle_course_id: Mapped[str] = mapped_column(String, index=True)
+    moodle_resource_link_id: Mapped[str] = mapped_column(String, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    assignment: Mapped["Assignment"] = relationship()
+
+
+class MoodleGroupLink(Base):
+    __tablename__ = "moodle_group_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "moodle_issuer",
+            "moodle_course_id",
+            "moodle_group_id",
+            name="uq_moodle_group_issuer_course",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
+    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"), unique=True)
+    moodle_issuer: Mapped[str] = mapped_column(String)
+    moodle_course_id: Mapped[str] = mapped_column(String, index=True)
+    moodle_group_id: Mapped[str] = mapped_column(String, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped["ProjectGroup"] = relationship()
 
 
 class TrainingCollectionMember(Base):

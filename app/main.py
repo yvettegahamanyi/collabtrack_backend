@@ -16,7 +16,7 @@ DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 # Import models so they are registered on Base.metadata.
 from app import models  # noqa: F401
 from app.database import engine
-from app.routers import admin, assignments, auth, classes, dataset, groups, integrations, instructor, invites, training, users
+from app.routers import admin, assignments, auth, classes, dataset, groups, integrations, instructor, invites, lti, training, users
 
 
 @asynccontextmanager
@@ -100,6 +100,10 @@ tags_metadata = [
     {
         "name": "instructor",
         "description": "Instructor dashboard and aggregated insights.",
+    },
+    {
+        "name": "lti",
+        "description": "Moodle LTI 1.3 launch endpoints (OIDC login, launch, JWKS).",
     },
     # {
     #     "name": "health",
@@ -186,6 +190,7 @@ app.include_router(integrations.router)
 app.include_router(classes.router)
 app.include_router(assignments.router)
 app.include_router(instructor.router)
+app.include_router(lti.router)
 
 
 # @app.get("/", tags=["health"], summary="Service root")
