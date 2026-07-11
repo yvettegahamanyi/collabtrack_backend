@@ -53,17 +53,32 @@ async def lti_login(request: Request):
     form = await request.form()
     form_data = _form_dict(form)
     target_link_uri = form_data.get("target_link_uri") or LTI_LAUNCH_URL
-    if not target_link_uri:
+    if not target_link_uri and not LTI_LAUNCH_URL:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="target_link_uri is required (or set LTI_LAUNCH_URL).",
+        )
+
+    # Moodle requires redirect_uri to exactly match a registered redirection URI.
+    # Always prefer the configured launch URL so it matches Moodle tool settings.
+    launch_url = LTI_LAUNCH_URL or target_link_uri
+    if (
+        LTI_LAUNCH_URL
+        and target_link_uri
+        and target_link_uri.rstrip("/") != LTI_LAUNCH_URL.rstrip("/")
+    ):
+        logger.warning(
+            "Moodle target_link_uri differs from LTI_LAUNCH_URL; using configured value. "
+            "target_link_uri=%s lti_launch_url=%s",
+            target_link_uri,
+            LTI_LAUNCH_URL,
         )
 
     def _redirect():
         tool_conf = get_tool_config()
         fastapi_request = build_fastapi_request(request, form_data)
         oidc = FastAPIOIDCLogin(fastapi_request, tool_conf)
-        return oidc.redirect(target_link_uri)
+        return oidc.redirect(launch_url)
 
     try:
         return await asyncio.to_thread(_redirect)
