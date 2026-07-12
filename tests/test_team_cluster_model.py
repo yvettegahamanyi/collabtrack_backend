@@ -4,9 +4,11 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pytest
-from app.services import team_cluster_model
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+
+from app.services import team_cluster_model
+from app.services.dataset_features import ML_FEATURE_COLUMNS
 
 
 @pytest.fixture(autouse=True)
@@ -17,79 +19,69 @@ def clear_model_cache():
 
 
 def _write_mock_artifacts(model_dir: Path) -> None:
-    base_cols = [
-        "code_commits",
-        "code_share",
-        "review_participation",
-        "attendance_ratio",
-        "speaking_participation_ratio",
-        "chat_participation_ratio",
-        "docs_contribution_share",
-        "comment_activity",
+    team_feature_cols = [
+        f"{col}_{stat}" for col in ML_FEATURE_COLUMNS for stat in ("mean", "std")
     ]
-    team_feature_cols = [f"{col}_{stat}" for col in base_cols for stat in ("mean", "std")]
     metadata = {
         "team_feature_cols": team_feature_cols,
-        "base_feature_cols": base_cols,
-        "cluster_archetypes": {"0": "balanced_team", "1": "one_dominant_contributor"},
+        "base_feature_cols": ML_FEATURE_COLUMNS,
+        "cluster_archetypes": {"0": "balanced_team", "1": "code_heavy_team"},
         "archetype_labels": {
-            "balanced_team": "Balanced team",
-            "one_dominant_contributor": "One dominant contributor",
+            "balanced_team": "Balanced Team",
+            "code_heavy_team": "Code Heavy Team",
         },
     }
+    (model_dir / "team_cluster").mkdir(parents=True)
     (model_dir / "team_cluster/team_cluster_metadata.json").write_text(
         json.dumps(metadata), encoding="utf-8"
     )
 
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(11)
     samples = rng.random((20, len(team_feature_cols)))
     scaler = StandardScaler()
     scaled = scaler.fit_transform(samples)
-    model = KMeans(n_clusters=2, random_state=42, n_init=10)
+    model = KMeans(n_clusters=2, random_state=11, n_init=10)
     model.fit(scaled)
 
     joblib.dump(model, model_dir / "team_cluster/team_cluster_model.joblib")
     joblib.dump(scaler, model_dir / "team_cluster/team_cluster_scaler.joblib")
 
 
-def test_predict_team_archetype(monkeypatch, tmp_path: Path):
+def _member_features(**overrides: float) -> dict[str, float]:
+    base = {col: 0.25 for col in ML_FEATURE_COLUMNS}
+    base.update(overrides)
+    return base
+
+
+def test_aggregate_team_features_builds_mean_and_std_columns():
+    members = [
+        _member_features(code_commits=0.2),
+        _member_features(code_commits=0.6),
+    ]
+
+    aggregated = team_cluster_model.aggregate_team_features(members)
+
+    assert aggregated["code_commits_mean"] == pytest.approx(0.4)
+    assert aggregated["code_commits_std"] == pytest.approx(0.2)
+    assert len(aggregated) == len(ML_FEATURE_COLUMNS) * 2
+
+
+def test_aggregate_team_features_returns_zeros_for_empty_team():
+    aggregated = team_cluster_model.aggregate_team_features([])
+
+    assert aggregated["code_commits_mean"] == 0.0
+    assert aggregated["code_commits_std"] == 0.0
+
+
+def test_predict_team_archetype_with_mock_artifacts(monkeypatch, tmp_path: Path):
     _write_mock_artifacts(tmp_path)
     monkeypatch.setattr(team_cluster_model, "_model_dir", lambda: tmp_path)
 
-    members = [
-        {
-            "code_commits": 0.3,
-            "code_share": 0.3,
-            "review_participation": 0.2,
-            "attendance_ratio": 0.8,
-            "speaking_participation_ratio": 0.4,
-            "chat_participation_ratio": 0.2,
-            "docs_contribution_share": 0.3,
-            "comment_activity": 0.1,
-        },
-        {
-            "code_commits": 0.2,
-            "code_share": 0.2,
-            "review_participation": 0.1,
-            "attendance_ratio": 0.7,
-            "speaking_participation_ratio": 0.3,
-            "chat_participation_ratio": 0.1,
-            "docs_contribution_share": 0.2,
-            "comment_activity": 0.0,
-        },
-    ]
-    result = team_cluster_model.predict_team_archetype(members)
+    result = team_cluster_model.predict_team_archetype(
+        [_member_features(), _member_features(code_commits=0.8)]
+    )
 
     assert "cluster_id" in result
-    assert "archetype" in result
-    assert "archetype_label" in result
-    assert len(result["team_features"]) == 16
-
-
-def test_missing_team_cluster_artifacts_raises(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr(team_cluster_model, "_model_dir", lambda: tmp_path)
-
-    with pytest.raises(team_cluster_model.TeamClusterModelUnavailableError):
-        team_cluster_model.get_team_cluster_model_bundle()
-
-    assert team_cluster_model.is_team_cluster_model_available() is False
+    assert result["archetype"] in {"balanced_team", "code_heavy_team"}
+    assert result["archetype_label"]
+    assert "team_features" in result

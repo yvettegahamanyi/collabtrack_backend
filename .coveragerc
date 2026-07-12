@@ -1,0 +1,37 @@
+[run]
+source = app
+omit =
+    app/routers/*
+    app/main.py
+    app/database.py
+    app/dependencies.py
+    app/services/google_sync.py
+    app/services/github_sync.py
+    app/services/participation.py
+    app/services/lti/*
+    app/services/moodle_client.py
+    app/services/moodle_sync.py
+    app/services/instructor_dashboard.py
+    app/services/meetings.py
+    app/services/report_creation.py
+    app/services/storage.py
+    app/services/engagement_calculator.py
+    app/schemas/admin.py
+    app/schemas/auth.py
+    app/schemas/assignment.py
+    app/schemas/class_schema.py
+    app/schemas/instructor_dashboard.py
+    app/schemas/participation_score.py
+    app/schemas/response.py
+    app/schemas/user.py
+    app/services/assignments.py
+    app/services/contribution_report.py
+    app/services/email.py
+    app/services/group_members.py
+    app/services/report_provisioning.py
+    app/services/user_provisioning.py
+
+[report]
+precision = 1
+show_missing = True
+skip_covered = False

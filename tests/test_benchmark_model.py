@@ -87,3 +87,26 @@ def test_missing_artifacts_raises(monkeypatch, tmp_path: Path):
         benchmark_model.get_benchmark_model_bundle()
 
     assert benchmark_model.is_benchmark_model_available() is False
+
+
+def test_missing_joblib_files_raises(monkeypatch, tmp_path: Path):
+    (tmp_path / "model_metadata.json").write_text(
+        json.dumps({"feature_cols": ["code_commits"], "score_range": [0.0, 1.0]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(benchmark_model, "_model_dir", lambda: tmp_path)
+
+    with pytest.raises(benchmark_model.BenchmarkModelUnavailableError, match="ML model files"):
+        benchmark_model.get_benchmark_model_bundle()
+
+
+def test_missing_feature_columns_raises(monkeypatch, tmp_path: Path):
+    _write_mock_artifacts(tmp_path)
+    (tmp_path / "model_metadata.json").write_text(
+        json.dumps({"feature_cols": [], "score_range": [0.0, 1.0]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(benchmark_model, "_model_dir", lambda: tmp_path)
+
+    with pytest.raises(benchmark_model.BenchmarkModelUnavailableError, match="feature_cols"):
+        benchmark_model.get_benchmark_model_bundle()

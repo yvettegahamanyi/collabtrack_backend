@@ -22,6 +22,7 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+performance/
 .tox/
 
 # IDE / OS
