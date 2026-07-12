@@ -33,6 +33,7 @@ from app.services.lti.grade_passback import (
     apply_ags_endpoint_to_activity_link,
     extract_ags_endpoint,
 )
+from app.services.lti.identity import resolve_launch_identity
 from app.services.meeting_parser import MemberRow
 from app.services.moodle_client import (
     MoodleClientError,
@@ -468,6 +469,12 @@ async def handle_instructor_lti_launch(
     if activity_link is not None and ags_endpoint is not None:
         apply_ags_endpoint_to_activity_link(activity_link, ags_endpoint)
         db.add(activity_link)
+        logger.info(
+            "Stored Moodle AGS endpoints for assignment %s (lineitem=%s scopes=%s)",
+            assignment.id,
+            bool(activity_link.ags_lineitem_url),
+            activity_link.ags_scopes,
+        )
 
     groups_imported, members_added, warnings = await import_moodle_groups_for_assignment(
         db,
