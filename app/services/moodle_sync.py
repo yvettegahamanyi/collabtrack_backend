@@ -29,7 +29,10 @@ from app.services.lti.config import (
     LTI_CLAIM_ROLES,
     is_instructor_launch,
 )
-from app.services.lti.identity import resolve_launch_identity
+from app.services.lti.grade_passback import (
+    apply_ags_endpoint_to_activity_link,
+    extract_ags_endpoint,
+)
 from app.services.meeting_parser import MemberRow
 from app.services.moodle_client import (
     MoodleClientError,
@@ -285,7 +288,13 @@ def _member_rows_from_moodle_users(users: list[dict]) -> list[MemberRow]:
             first = (user.get("firstname") or "").strip()
             last = (user.get("lastname") or "").strip()
             fullname = f"{first} {last}".strip() or email.split("@")[0]
-        rows.append(MemberRow(name=fullname, email=email))
+        rows.append(
+            MemberRow(
+                name=fullname,
+                email=email,
+                moodle_user_id=str(user.get("id", "")).strip() or None,
+            )
+        )
     return rows
 
 
@@ -450,6 +459,16 @@ async def handle_instructor_lti_launch(
         activity_title=str(activity_title),
     )
 
+    activity_link = await db.scalar(
+        select(MoodleActivityLink).where(
+            MoodleActivityLink.assignment_id == assignment.id
+        )
+    )
+    ags_endpoint = extract_ags_endpoint(launch_data)
+    if activity_link is not None and ags_endpoint is not None:
+        apply_ags_endpoint_to_activity_link(activity_link, ags_endpoint)
+        db.add(activity_link)
+
     groups_imported, members_added, warnings = await import_moodle_groups_for_assignment(
         db,
         assignment=assignment,
@@ -457,6 +476,13 @@ async def handle_instructor_lti_launch(
         moodle_issuer=moodle_issuer,
         moodle_course_id=moodle_course_id,
     )
+
+    if activity_link is not None and ags_endpoint is None:
+        warnings.append(
+            "Moodle did not include grade passback (AGS) endpoints in this launch. "
+            "Enable Assignment and Grade Services on the external tool, then launch "
+            "CollabTrack again to sync scores to the Moodle gradebook."
+        )
 
     await db.commit()
 

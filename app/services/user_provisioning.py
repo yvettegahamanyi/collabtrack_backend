@@ -21,6 +21,7 @@ async def get_or_create_student(
     email: str,
     name: str,
     instructor_id: str,
+    moodle_user_id: str | None = None,
 ) -> User:
     """Return an existing student or auto-provision a pending one."""
     normalized_email = email.lower().strip()
@@ -31,6 +32,10 @@ async def get_or_create_student(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="User exists but is not a student.",
             )
+        if moodle_user_id and not user.moodle_user_id:
+            user.moodle_user_id = moodle_user_id
+            db.add(user)
+            await db.flush()
         return user
 
     user = User(
@@ -43,6 +48,7 @@ async def get_or_create_student(
         must_change_password=True,
         provisioned_by_instructor_id=instructor_id,
         is_active=True,
+        moodle_user_id=moodle_user_id,
     )
     db.add(user)
     await db.flush()

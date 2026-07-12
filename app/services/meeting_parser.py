@@ -99,6 +99,7 @@ def parse_attendance_csv(content: str) -> dict[str, AttendanceRecord]:
 class MemberRow:
     name: str
     email: str
+    moodle_user_id: str | None = None
 
 
 def _parse_member_csv(content: str) -> list[MemberRow]:

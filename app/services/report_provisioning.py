@@ -21,6 +21,7 @@ async def provision_members_from_attendance(
             email=row.email,
             name=row.name,
             instructor_id=instructor_id,
+            moodle_user_id=row.moodle_user_id,
         )
         membership = await add_member_if_missing(
             db,

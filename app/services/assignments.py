@@ -5,15 +5,24 @@ from app.models import (
     ContributionReport,
     GroupGithubRepo,
     GroupGoogleDoc,
+    MoodleActivityLink,
     ProjectGroup,
     User,
 )
+from app.services.lti.grade_passback import activity_link_has_ags
 from app.schemas.report import AssignmentReportOut
 
 
 async def serialize_assignment_reports(
     assignment_id: str, db: AsyncSession
 ) -> list[AssignmentReportOut]:
+    activity_link = await db.scalar(
+        select(MoodleActivityLink).where(
+            MoodleActivityLink.assignment_id == assignment_id
+        )
+    )
+    moodle_grade_sync_available = activity_link_has_ags(activity_link)
+
     groups = await db.scalars(
         select(ProjectGroup)
         .where(ProjectGroup.assignment_id == assignment_id)
@@ -52,6 +61,7 @@ async def serialize_assignment_reports(
                     contribution.notification_sent_at if contribution else None
                 ),
                 has_collaboration_resources=has_resources,
+                moodle_grade_sync_available=moodle_grade_sync_available,
             )
         )
     return reports

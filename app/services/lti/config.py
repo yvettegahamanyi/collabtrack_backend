@@ -2,6 +2,7 @@ import os
 
 from dotenv import load_dotenv
 from fastapi import HTTPException, status
+from pylti1p3.registration import Registration
 from pylti1p3.tool_config import ToolConfDict
 
 load_dotenv()
@@ -23,6 +24,9 @@ LTI_CLAIM_RESOURCE_LINK = "https://purl.imsglobal.org/spec/lti/claim/resource_li
 LTI_CLAIM_ROLES = "https://purl.imsglobal.org/spec/lti/claim/roles"
 LTI_CLAIM_LIS = "https://purl.imsglobal.org/spec/lti/claim/lis"
 LTI_CLAIM_CUSTOM = "https://purl.imsglobal.org/spec/lti/claim/custom"
+LTI_CLAIM_AGS = "https://purl.imsglobal.org/spec/lti-ags/claim/endpoint"
+
+LTI_AGS_DEFAULT_SCORE_MAXIMUM = float(os.getenv("LTI_AGS_DEFAULT_SCORE_MAXIMUM", "100"))
 
 _INSTRUCTOR_ROLES = {
     "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Instructor",
@@ -103,3 +107,21 @@ def get_tool_config() -> ToolConfDict:
 
 def is_instructor_launch(roles: list[str]) -> bool:
     return any(role in _INSTRUCTOR_ROLES for role in roles)
+
+
+def get_moodle_registration() -> Registration:
+    require_lti_configured()
+    registration = (
+        Registration()
+        .set_issuer(MOODLE_PLATFORM_ISS)
+        .set_client_id(MOODLE_CLIENT_ID)
+        .set_auth_token_url(MOODLE_AUTH_TOKEN_URL)
+        .set_auth_login_url(MOODLE_AUTH_LOGIN_URL)
+    )
+    if MOODLE_KEY_SET_URL:
+        registration.set_key_set_url(MOODLE_KEY_SET_URL)
+    registration.set_tool_private_key(
+        _normalize_pem(LTI_TOOL_PRIVATE_KEY, private=True)
+    )
+    registration.set_tool_public_key(_normalize_pem(LTI_TOOL_PUBLIC_KEY, private=False))
+    return registration

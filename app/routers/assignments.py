@@ -18,6 +18,7 @@ from app.schemas.report import (
     MemberPreview,
     MembersPreviewOut,
     SetupReportOut,
+    MoodleGradeSyncOut,
 )
 from app.schemas.response import ApiResponse, success
 from app.services.assignments import serialize_assignment_reports
@@ -34,6 +35,7 @@ from app.services.contribution_report import (
 )
 from app.services.groups import get_group_or_404
 from app.services.meeting_parser import MeetingParseError, parse_member_list
+from app.services.lti.grade_passback import sync_group_scores_to_moodle
 from app.services.participation import get_contributions
 from app.services.report_creation import (
     bootstrap_assignment_report,
@@ -366,3 +368,32 @@ async def notify_supervisor(
     await resend_supervisor_notification(group, assignment, db)
     await db.commit()
     return success(data=None, message="Instructor notification sent.")
+
+
+@router.post(
+    "/assignments/{assignment_id}/reports/{group_id}/sync-moodle-grades",
+    response_model=ApiResponse[MoodleGradeSyncOut],
+)
+async def sync_moodle_grades(
+    assignment_id: str,
+    group_id: str,
+    current_user: User = Depends(get_current_instructor),
+    db: AsyncSession = Depends(get_db),
+):
+    await require_assignment_owner(assignment_id, current_user, db)
+    group = await get_group_or_404(group_id, db)
+    if group.assignment_id != assignment_id:
+        raise HTTPException(status_code=404, detail="Report not found in this assignment.")
+
+    result = await sync_group_scores_to_moodle(
+        db,
+        group=group,
+        assignment_id=assignment_id,
+    )
+    return success(
+        data=MoodleGradeSyncOut.model_validate(result),
+        message=(
+            f"Synced {result['synced_count']} grade(s) to Moodle "
+            f"({result['failed_count']} failed, {result['skipped_count']} skipped)."
+        ),
+    )

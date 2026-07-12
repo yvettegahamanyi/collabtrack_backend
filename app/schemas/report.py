@@ -39,6 +39,7 @@ class AssignmentReportOut(BaseModel):
     contribution_report_status: ContributionReportStatus | None = None
     notification_sent_at: datetime | None = None
     has_collaboration_resources: bool = False
+    moodle_grade_sync_available: bool = False
 
 
 class AssignmentReportDetailOut(AssignmentReportOut):
@@ -61,3 +62,23 @@ class SetupReportOut(BaseModel):
     report_status: ReportStatus
     resources_linked: int
     meetings_queued: int
+
+
+class MoodleGradeSyncStudentResult(BaseModel):
+    user_id: str
+    student_name: str
+    moodle_user_id: str | None = None
+    score_given: float | None = None
+    status: str
+    message: str | None = None
+
+
+class MoodleGradeSyncOut(BaseModel):
+    group_id: str
+    assignment_id: str
+    score_maximum: float
+    synced_count: int
+    failed_count: int
+    skipped_count: int
+    results: list[MoodleGradeSyncStudentResult]
+    synced_at: datetime
