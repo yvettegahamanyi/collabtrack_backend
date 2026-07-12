@@ -19,7 +19,7 @@ from app.models import (
     User,
 )
 from app.schemas.meetings import MeetingSessionCreate
-from app.schemas.report import CreateReportOut, ReportMemberInput
+from app.schemas.report import CreateReportOut, ReportMemberInput, SetupReportOut
 from app.services.assignments import allocate_group_number
 from app.services.contribution_report import check_and_finalize_report
 from app.services.integrations import parse_github_repo_url, parse_google_doc_url
@@ -116,6 +116,52 @@ async def bootstrap_assignment_report(
     )
 
 
+async def configure_assignment_report(
+    *,
+    group: ProjectGroup,
+    github_urls: list[str],
+    google_doc_urls: list[str],
+    db: AsyncSession,
+) -> SetupReportOut:
+    if not github_urls and not google_doc_urls:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Add at least one GitHub repository URL or Google Doc URL.",
+        )
+
+    resources_linked = 0
+    for url in github_urls:
+        owner, repo = parse_github_repo_url(url.strip())
+        try:
+            await link_github_repo(group, url.strip(), owner, repo, db)
+            resources_linked += 1
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_409_CONFLICT:
+                raise
+
+    for url in google_doc_urls:
+        file_id = parse_google_doc_url(url.strip())
+        try:
+            await link_google_doc(group, url.strip(), file_id, db)
+            resources_linked += 1
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_409_CONFLICT:
+                raise
+
+    group.report_status = ReportStatus.PROCESSING
+    db.add(group)
+    await db.commit()
+    await db.refresh(group)
+
+    return SetupReportOut(
+        group_id=group.id,
+        group_name=group.group_name,
+        report_status=ReportStatus.PROCESSING,
+        resources_linked=resources_linked,
+        meetings_queued=0,
+    )
+
+
 async def process_assignment_report_meetings(
     *,
     group_id: str,
@@ -170,6 +216,36 @@ async def process_assignment_report_meetings(
                 group.report_status = ReportStatus.FAILED
                 db.add(group)
                 await db.commit()
+
+
+async def parse_meeting_payloads_from_form(form) -> list[MeetingFilePayload]:
+    meeting_payloads: list[MeetingFilePayload] = []
+    index = 0
+    while True:
+        trans = form.get(f"meeting_{index}_transcript")
+        chat = form.get(f"meeting_{index}_chat")
+        if not isinstance(trans, StarletteUploadFile):
+            if isinstance(chat, StarletteUploadFile):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Meeting {index + 1} requires a transcript file.",
+                )
+            break
+        chat_bytes = None
+        chat_filename = None
+        if isinstance(chat, StarletteUploadFile):
+            chat_bytes = await chat.read()
+            chat_filename = chat.filename or f"meeting_{index}_chat.txt"
+        meeting_payloads.append(
+            MeetingFilePayload(
+                transcript=await trans.read(),
+                transcript_filename=trans.filename or f"meeting_{index}_transcript.txt",
+                chat=chat_bytes,
+                chat_filename=chat_filename,
+            )
+        )
+        index += 1
+    return meeting_payloads
 
 
 def parse_url_list(raw: str | None) -> list[str]:

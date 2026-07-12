@@ -21,6 +21,8 @@ LTI_TOOL_PUBLIC_KEY = os.getenv("LTI_TOOL_PUBLIC_KEY", "")
 LTI_CLAIM_CONTEXT = "https://purl.imsglobal.org/spec/lti/claim/context"
 LTI_CLAIM_RESOURCE_LINK = "https://purl.imsglobal.org/spec/lti/claim/resource_link"
 LTI_CLAIM_ROLES = "https://purl.imsglobal.org/spec/lti/claim/roles"
+LTI_CLAIM_LIS = "https://purl.imsglobal.org/spec/lti/claim/lis"
+LTI_CLAIM_CUSTOM = "https://purl.imsglobal.org/spec/lti/claim/custom"
 
 _INSTRUCTOR_ROLES = {
     "http://purl.imsglobal.org/vocab/lis/v2/institution/person#Instructor",

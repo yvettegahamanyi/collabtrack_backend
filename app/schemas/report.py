@@ -38,6 +38,7 @@ class AssignmentReportOut(BaseModel):
     contribution_report_id: str | None = None
     contribution_report_status: ContributionReportStatus | None = None
     notification_sent_at: datetime | None = None
+    has_collaboration_resources: bool = False
 
 
 class AssignmentReportDetailOut(AssignmentReportOut):
@@ -52,3 +53,11 @@ class CreateReportOut(BaseModel):
     report_status: ReportStatus
     members_provisioned: int
     meetings_created: int
+
+
+class SetupReportOut(BaseModel):
+    group_id: str
+    group_name: str | None
+    report_status: ReportStatus
+    resources_linked: int
+    meetings_queued: int

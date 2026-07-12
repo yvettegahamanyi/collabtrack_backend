@@ -1,7 +1,13 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ContributionReport, ProjectGroup, User
+from app.models import (
+    ContributionReport,
+    GroupGithubRepo,
+    GroupGoogleDoc,
+    ProjectGroup,
+    User,
+)
 from app.schemas.report import AssignmentReportOut
 
 
@@ -21,6 +27,17 @@ async def serialize_assignment_reports(
             .order_by(ContributionReport.generated_at.desc())
             .limit(1)
         )
+        repo_count = await db.scalar(
+            select(func.count())
+            .select_from(GroupGithubRepo)
+            .where(GroupGithubRepo.group_id == group.id)
+        )
+        doc_count = await db.scalar(
+            select(func.count())
+            .select_from(GroupGoogleDoc)
+            .where(GroupGoogleDoc.group_id == group.id)
+        )
+        has_resources = (repo_count or 0) + (doc_count or 0) > 0
         reports.append(
             AssignmentReportOut(
                 group_id=group.id,
@@ -34,6 +51,7 @@ async def serialize_assignment_reports(
                 notification_sent_at=(
                     contribution.notification_sent_at if contribution else None
                 ),
+                has_collaboration_resources=has_resources,
             )
         )
     return reports

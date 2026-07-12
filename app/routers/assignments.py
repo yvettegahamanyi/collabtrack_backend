@@ -17,6 +17,7 @@ from app.schemas.report import (
     CreateReportOut,
     MemberPreview,
     MembersPreviewOut,
+    SetupReportOut,
 )
 from app.schemas.response import ApiResponse, success
 from app.services.assignments import serialize_assignment_reports
@@ -35,8 +36,9 @@ from app.services.groups import get_group_or_404
 from app.services.meeting_parser import MeetingParseError, parse_member_list
 from app.services.participation import get_contributions
 from app.services.report_creation import (
-    MeetingFilePayload,
     bootstrap_assignment_report,
+    configure_assignment_report,
+    parse_meeting_payloads_from_form,
     parse_members_payload,
     parse_url_list,
     process_assignment_report_meetings,
@@ -218,32 +220,7 @@ async def create_report(
         google_raw if isinstance(google_raw, str) else None
     )
 
-    meeting_payloads: list[MeetingFilePayload] = []
-    index = 0
-    while True:
-        trans = form.get(f"meeting_{index}_transcript")
-        chat = form.get(f"meeting_{index}_chat")
-        if not isinstance(trans, StarletteUploadFile):
-            if isinstance(chat, StarletteUploadFile):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Meeting {index + 1} requires a transcript file.",
-                )
-            break
-        chat_bytes = None
-        chat_filename = None
-        if isinstance(chat, StarletteUploadFile):
-            chat_bytes = await chat.read()
-            chat_filename = chat.filename or f"meeting_{index}_chat.txt"
-        meeting_payloads.append(
-            MeetingFilePayload(
-                transcript=await trans.read(),
-                transcript_filename=trans.filename or f"meeting_{index}_transcript.txt",
-                chat=chat_bytes,
-                chat_filename=chat_filename,
-            )
-        )
-        index += 1
+    meeting_payloads = await parse_meeting_payloads_from_form(form)
 
     group, result = await bootstrap_assignment_report(
         assignment_id=assignment_id,
@@ -266,6 +243,57 @@ async def create_report(
         data=result,
         message="Report created successfully. Processing in background.",
         code=status.HTTP_201_CREATED,
+    )
+
+
+@router.post(
+    "/assignments/{assignment_id}/reports/{group_id}/setup",
+    response_model=ApiResponse[SetupReportOut],
+    status_code=status.HTTP_200_OK,
+)
+async def setup_report(
+    assignment_id: str,
+    group_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_instructor),
+    db: AsyncSession = Depends(get_db),
+):
+    await require_assignment_owner(assignment_id, current_user, db)
+    group = await get_group_or_404(group_id, db)
+    if group.assignment_id != assignment_id:
+        raise HTTPException(status_code=404, detail="Report not found in this assignment.")
+
+    form = await request.form()
+    github_list = parse_url_list(
+        form.get("github_urls") if isinstance(form.get("github_urls"), str) else None
+    )
+    google_list = parse_url_list(
+        form.get("google_doc_urls")
+        if isinstance(form.get("google_doc_urls"), str)
+        else None
+    )
+    meeting_payloads = await parse_meeting_payloads_from_form(form)
+
+    result = await configure_assignment_report(
+        group=group,
+        github_urls=github_list,
+        google_doc_urls=google_list,
+        db=db,
+    )
+
+    background_tasks.add_task(
+        process_assignment_report_meetings,
+        group_id=group.id,
+        assignment_id=assignment_id,
+        instructor_id=current_user.id,
+        meetings=meeting_payloads,
+    )
+
+    result = result.model_copy(update={"meetings_queued": len(meeting_payloads)})
+    return success(
+        data=result,
+        message="Collaboration data saved. Processing in background.",
     )
 
 

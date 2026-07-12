@@ -29,6 +29,7 @@ from app.services.lti.config import (
     LTI_CLAIM_ROLES,
     is_instructor_launch,
 )
+from app.services.lti.identity import resolve_launch_identity
 from app.services.meeting_parser import MemberRow
 from app.services.moodle_client import (
     MoodleClientError,
@@ -377,11 +378,18 @@ async def handle_instructor_lti_launch(
             detail="Only instructors can launch CollabTrack from Moodle.",
         )
 
-    email = (launch_data.get("email") or "").strip()
+    email, name = await resolve_launch_identity(launch_data)
     if not email:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Moodle did not provide an email address in the LTI launch.",
+            detail=(
+                "Moodle did not provide an email address in the LTI launch. "
+                "In Moodle tool settings set Privacy → "
+                "'Share launcher's email with tool' to Always, and ensure your "
+                "Moodle profile has an email address. CollabTrack can also look up "
+                "the email via web services when core_user_get_users_by_field is "
+                "enabled on your token."
+            ),
         )
 
     lti_sub = str(launch_data.get("sub", ""))
@@ -390,12 +398,6 @@ async def handle_instructor_lti_launch(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Missing LTI subject identifier.",
         )
-
-    name = (launch_data.get("name") or "").strip()
-    if not name:
-        given = (launch_data.get("given_name") or "").strip()
-        family = (launch_data.get("family_name") or "").strip()
-        name = f"{given} {family}".strip()
 
     moodle_issuer = str(launch_data.get("iss", "")).rstrip("/")
     context = launch_data.get(LTI_CLAIM_CONTEXT) or {}

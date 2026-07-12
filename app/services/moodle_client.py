@@ -95,11 +95,20 @@ async def get_group_enrolled_users(course_id: int, group_id: int) -> list[dict]:
     if not user_ids:
         return []
 
-    users_data = await moodle_ws_call(
+    return await get_users_by_field("id", user_ids)
+
+
+async def get_users_by_field(field: str, values: list[int | str]) -> list[dict]:
+    data = await moodle_ws_call(
         "core_user_get_users_by_field",
-        field="id",
-        values=user_ids,
+        field=field,
+        values=values,
     )
-    if not isinstance(users_data, list):
+    if not isinstance(data, list):
         return []
-    return users_data
+    return data
+
+
+async def get_moodle_user_by_id(user_id: str | int) -> dict | None:
+    users = await get_users_by_field("id", [int(user_id)])
+    return users[0] if users else None
