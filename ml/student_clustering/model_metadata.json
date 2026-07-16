@@ -1,0 +1,55 @@
+{
+  "model_type": "KMeans (platform-aware composite score)",
+  "version": "v2",
+  "labeling_method": "Per-team detection of active platforms (code/meetings/communication); each student's composite score = mean of standardized features ONLY within platforms their team actually used; then KMeans k=3 on that score.",
+  "n_clusters": 3,
+  "random_state": 42,
+  "platforms": {
+    "code": [
+      "code_commits",
+      "code_share",
+      "review_participation"
+    ],
+    "meetings": [
+      "attendance_ratio",
+      "speaking_participation_ratio"
+    ],
+    "communication": [
+      "chat_participation_ratio",
+      "docs_contribution_share",
+      "comment_activity"
+    ]
+  },
+  "input_schema": {
+    "required_raw_features_in_order": [
+      "code_commits",
+      "code_share",
+      "review_participation",
+      "attendance_ratio",
+      "speaking_participation_ratio",
+      "chat_participation_ratio",
+      "docs_contribution_share",
+      "comment_activity"
+    ],
+    "note": "Predictions require ALL teammates' feature rows together (a list of dicts, one per student on the team) -- NOT one student in isolation -- because active platforms are determined at the team level."
+  },
+  "cluster_name_map": {
+    "0": "Free-Rider",
+    "2": "Normal Contributor",
+    "1": "Over-Contributor"
+  },
+  "training_metrics": {
+    "silhouette": 0.5561832278275328
+  },
+  "cluster_sizes": {
+    "Free-Rider": 82,
+    "Normal Contributor": 64,
+    "Over-Contributor": 10
+  },
+  "teams_by_platforms_used": {
+    "1": 9,
+    "2": 18,
+    "3": 16
+  },
+  "notes": "benchmark_score is excluded from the model and must NOT be sent by API clients. v1 (population-wide, non-platform-aware) model is superseded by this version for any team that doesn't use all 3 platforms."
+}

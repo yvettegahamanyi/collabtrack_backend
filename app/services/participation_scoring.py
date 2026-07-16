@@ -4,6 +4,8 @@ import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from typing import Any
+
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,10 +35,10 @@ from app.services.outlier_model import (
     detect_student_outlier,
     is_outlier_model_available,
 )
-from app.services.team_cluster_model import (
-    TeamClusterModelUnavailableError,
-    is_team_cluster_model_available,
-    predict_team_archetype,
+from app.services.student_cluster_model import (
+    StudentClusterModelUnavailableError,
+    is_student_cluster_model_available,
+    predict_team_clusters,
 )
 from app.services.dataset import allocate_dataset_group_id
 from app.services.dataset_features import (
@@ -65,10 +67,12 @@ class OutlierDetectionResult:
 
 
 @dataclass
-class TeamArchetypeResult:
+class StudentClusterResult:
     cluster_id: int
-    archetype: str
-    archetype_label: str
+    cluster_key: str
+    cluster_label: str
+    composite_score: float = 0.0
+    active_platforms: list[str] | None = None
 
 
 @dataclass
@@ -80,6 +84,7 @@ class ParticipationScoreResult:
     features: dict[str, float]
     generated_at: datetime
     outlier: OutlierDetectionResult | None = None
+    student_cluster: StudentClusterResult | None = None
     llm_rationale: dict | None = None
 
 
@@ -89,7 +94,6 @@ class ParticipationScoresSummary:
     generated_at: datetime
     scores: list[ParticipationScoreResult]
     warnings: list[str]
-    team_archetype: TeamArchetypeResult | None = None
 
 
 def _tier_label(tier: str) -> str:
@@ -102,6 +106,48 @@ def _tier_label(tier: str) -> str:
 
 def tier_display_label(tier: str) -> str:
     return _tier_label(tier)
+
+
+def _student_cluster_from_prediction(result: dict[str, Any]) -> StudentClusterResult:
+    return StudentClusterResult(
+        cluster_id=int(result["cluster_id"]),
+        cluster_key=str(result["cluster_key"]),
+        cluster_label=str(result["cluster_label"]),
+        composite_score=float(result.get("composite_score", 0.0)),
+        active_platforms=list(result.get("active_platforms") or []),
+    )
+
+
+def _attach_student_clusters_to_scores(
+    scores: list[ParticipationScoreResult],
+) -> list[ParticipationScoreResult]:
+    if not scores or not is_student_cluster_model_available():
+        return scores
+
+    try:
+        cluster_results = predict_team_clusters(
+            [score.features for score in scores]
+        )
+    except StudentClusterModelUnavailableError:
+        return scores
+
+    if len(cluster_results) != len(scores):
+        return scores
+
+    return [
+        ParticipationScoreResult(
+            user_id=score.user_id,
+            name=score.name,
+            predicted_score=score.predicted_score,
+            contributor_tier=score.contributor_tier,
+            features=score.features,
+            generated_at=score.generated_at,
+            outlier=score.outlier,
+            student_cluster=_student_cluster_from_prediction(cluster),
+            llm_rationale=score.llm_rationale,
+        )
+        for score, cluster in zip(scores, cluster_results, strict=True)
+    ]
 
 
 def _detect_outlier_for_features(
@@ -120,26 +166,8 @@ def _detect_outlier_for_features(
     )
 
 
-def _predict_team_archetype_for_scores(
-    scores: list[ParticipationScoreResult],
-) -> TeamArchetypeResult | None:
-    if not scores or not is_team_cluster_model_available():
-        return None
-    try:
-        result = predict_team_archetype([score.features for score in scores])
-    except TeamClusterModelUnavailableError:
-        return None
-    return TeamArchetypeResult(
-        cluster_id=int(result["cluster_id"]),
-        archetype=str(result["archetype"]),
-        archetype_label=str(result["archetype_label"]),
-    )
-
-
 def enrich_scores_summary_with_ml_insights(
     summary: ParticipationScoresSummary,
-    *,
-    include_team_archetype: bool = True,
 ) -> ParticipationScoresSummary:
     if not summary.scores:
         return summary
@@ -157,17 +185,12 @@ def enrich_scores_summary_with_ml_insights(
         )
         for score in summary.scores
     ]
-    team_archetype = (
-        _predict_team_archetype_for_scores(enriched_scores)
-        if include_team_archetype
-        else None
-    )
+    enriched_scores = _attach_student_clusters_to_scores(enriched_scores)
     return ParticipationScoresSummary(
         group_id=summary.group_id,
         generated_at=summary.generated_at,
         scores=enriched_scores,
         warnings=list(summary.warnings),
-        team_archetype=team_archetype,
     )
 
 
@@ -674,22 +697,26 @@ def _print_scoring_debug(
         for wline in textwrap.wrap(llm_output.group_observations, width=_BOX_WIDTH - 4):
             lines.append(f"    {_C.BLUE}{wline}{_C.RESET}")
 
-    # --- ML enrichment (Isolation Forest + KMeans) ---
+    # --- ML enrichment (student clustering, outlier) ---
     lines.append(_rule("ML ENRICHMENT"))
-    if summary.team_archetype is not None:
-        ta = summary.team_archetype
-        lines.append(
-            f"  {_C.BOLD}Team archetype:{_C.RESET} "
-            f"{_C.CYAN}{ta.archetype_label}{_C.RESET} "
-            f"{_C.DIM}(cluster {ta.cluster_id}, {ta.archetype}){_C.RESET}"
-        )
-    else:
-        lines.append(f"  {_C.DIM}Team archetype: unavailable{_C.RESET}")
     for ref, membership in member_by_ref.items():
         score = score_by_userid.get(ref_to_userid.get(ref))
         if score is None:
             continue
         name = ref_to_name.get(ref, "?")
+        cluster = score.student_cluster
+        if cluster is None:
+            lines.append(
+                f"  {ref} ({name}): {_C.DIM}student cluster unavailable{_C.RESET}"
+            )
+        else:
+            platforms = ", ".join(cluster.active_platforms or []) or "none"
+            lines.append(
+                f"  {ref} ({name}): {_C.CYAN}{cluster.cluster_label}{_C.RESET}  "
+                f"{_C.DIM}(cluster {cluster.cluster_id}, composite="
+                f"{cluster.composite_score:.3f}, platforms={platforms}){_C.RESET}"
+            )
+
         outlier = score.outlier
         if outlier is None:
             lines.append(f"  {ref} ({name}): {_C.DIM}outlier model unavailable{_C.RESET}")
@@ -888,10 +915,7 @@ async def get_participation_scores_for_group(
         )
 
     if viewer_is_manager:
-        return enrich_scores_summary_with_ml_insights(
-            existing,
-            include_team_archetype=True,
-        )
+        return enrich_scores_summary_with_ml_insights(existing)
 
     filtered = [
         score for score in existing.scores if score.user_id == viewer_user_id
@@ -902,8 +926,7 @@ async def get_participation_scores_for_group(
             generated_at=existing.generated_at,
             scores=filtered,
             warnings=[],
-        ),
-        include_team_archetype=True,
+        )
     )
 
 
@@ -912,28 +935,35 @@ async def get_member_participation_score(
     user_id: str,
     db: AsyncSession,
 ) -> ParticipationScoreResult | None:
-    row = await db.scalar(
+    rows = await db.scalars(
         select(MemberParticipationScore)
-        .where(
-            MemberParticipationScore.group_id == group.id,
-            MemberParticipationScore.user_id == user_id,
-        )
+        .where(MemberParticipationScore.group_id == group.id)
         .options(selectinload(MemberParticipationScore.user))
+        .order_by(MemberParticipationScore.user_id.asc())
     )
-    if row is None:
+    all_rows = list(rows.all())
+    if not all_rows:
         return None
 
-    result = ParticipationScoreResult(
-        user_id=row.user_id,
-        name=row.user.name,
-        predicted_score=row.predicted_score,
-        contributor_tier=row.contributor_tier,
-        features=dict(row.features or {}),
-        generated_at=row.generated_at,
-        outlier=_detect_outlier_for_features(dict(row.features or {})),
-        llm_rationale=dict(row.llm_rationale) if row.llm_rationale else None,
-    )
-    return result
+    target = next((row for row in all_rows if row.user_id == user_id), None)
+    if target is None:
+        return None
+
+    score_results = [
+        ParticipationScoreResult(
+            user_id=row.user_id,
+            name=row.user.name,
+            predicted_score=row.predicted_score,
+            contributor_tier=row.contributor_tier,
+            features=dict(row.features or {}),
+            generated_at=row.generated_at,
+            outlier=_detect_outlier_for_features(dict(row.features or {})),
+            llm_rationale=dict(row.llm_rationale) if row.llm_rationale else None,
+        )
+        for row in all_rows
+    ]
+    enriched = _attach_student_clusters_to_scores(score_results)
+    return next((score for score in enriched if score.user_id == user_id), None)
 
 
 async def try_generate_participation_scores_for_report(

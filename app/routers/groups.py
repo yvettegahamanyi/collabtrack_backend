@@ -50,7 +50,7 @@ from app.schemas.participation_score import (
     OutlierDetectionOut,
     ParticipationScoreOut,
     ParticipationScoresSummaryOut,
-    TeamArchetypeOut,
+    StudentClusterOut,
 )
 from app.services.group_members import (
     add_member_if_missing,
@@ -777,14 +777,6 @@ def _serialize_rationale(score) -> LLMRationaleOut | None:
 
 
 def _serialize_scores_summary(summary) -> ParticipationScoresSummaryOut:
-    team_archetype = None
-    if summary.team_archetype is not None:
-        team_archetype = TeamArchetypeOut(
-            cluster_id=summary.team_archetype.cluster_id,
-            archetype=summary.team_archetype.archetype,
-            archetype_label=summary.team_archetype.archetype_label,
-        )
-
     return ParticipationScoresSummaryOut(
         group_id=summary.group_id,
         generated_at=summary.generated_at,
@@ -805,12 +797,24 @@ def _serialize_scores_summary(summary) -> ParticipationScoresSummaryOut:
                     if score.outlier is not None
                     else None
                 ),
+                student_cluster=(
+                    StudentClusterOut(
+                        cluster_id=score.student_cluster.cluster_id,
+                        cluster_key=score.student_cluster.cluster_key,
+                        cluster_label=score.student_cluster.cluster_label,
+                        composite_score=score.student_cluster.composite_score,
+                        active_platforms=list(
+                            score.student_cluster.active_platforms or []
+                        ),
+                    )
+                    if score.student_cluster is not None
+                    else None
+                ),
                 llm_rationale=_serialize_rationale(score),
             )
             for score in summary.scores
         ],
         warnings=summary.warnings,
-        team_archetype=team_archetype,
     )
 
 
@@ -917,6 +921,17 @@ async def get_member_participation_score_endpoint(
                     outlier_type=score.outlier.outlier_type,
                 )
                 if score.outlier is not None
+                else None
+            ),
+            student_cluster=(
+                StudentClusterOut(
+                    cluster_id=score.student_cluster.cluster_id,
+                    cluster_key=score.student_cluster.cluster_key,
+                    cluster_label=score.student_cluster.cluster_label,
+                    composite_score=score.student_cluster.composite_score,
+                    active_platforms=list(score.student_cluster.active_platforms or []),
+                )
+                if score.student_cluster is not None
                 else None
             ),
             llm_rationale=_serialize_rationale(score),

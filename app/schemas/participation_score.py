@@ -9,10 +9,12 @@ class OutlierDetectionOut(BaseModel):
     outlier_type: str
 
 
-class TeamArchetypeOut(BaseModel):
+class StudentClusterOut(BaseModel):
     cluster_id: int
-    archetype: str
-    archetype_label: str
+    cluster_key: str
+    cluster_label: str
+    composite_score: float = 0.0
+    active_platforms: list[str] = Field(default_factory=list)
 
 
 class LLMRationaleOut(BaseModel):
@@ -32,6 +34,7 @@ class ParticipationScoreOut(BaseModel):
     features: dict[str, float] = Field(default_factory=dict)
     generated_at: datetime
     outlier: OutlierDetectionOut | None = None
+    student_cluster: StudentClusterOut | None = None
     llm_rationale: LLMRationaleOut | None = None
 
 
@@ -42,4 +45,3 @@ class ParticipationScoresSummaryOut(BaseModel):
     generated_at: datetime
     scores: list[ParticipationScoreOut]
     warnings: list[str] = Field(default_factory=list)
-    team_archetype: TeamArchetypeOut | None = None

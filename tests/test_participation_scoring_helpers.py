@@ -97,7 +97,7 @@ def test_enrich_scores_summary_returns_empty_summary_unchanged():
     assert enriched.warnings == ["none"]
 
 
-def test_enrich_scores_summary_adds_outlier_and_team_archetype(monkeypatch):
+def test_enrich_scores_summary_adds_outlier_and_student_cluster(monkeypatch):
     summary = ParticipationScoresSummary(
         group_id="g1",
         generated_at=datetime.now(timezone.utc),
@@ -118,20 +118,25 @@ def test_enrich_scores_summary_adds_outlier_and_team_archetype(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "app.services.participation_scoring.is_team_cluster_model_available",
+        "app.services.participation_scoring.is_student_cluster_model_available",
         lambda: True,
     )
     monkeypatch.setattr(
-        "app.services.participation_scoring.predict_team_archetype",
-        lambda member_features: {
-            "cluster_id": 1,
-            "archetype": "balanced_team",
-            "archetype_label": "Balanced Team",
-            "team_features": {},
-        },
+        "app.services.participation_scoring.predict_team_clusters",
+        lambda team_students: [
+            {
+                "cluster_id": 2,
+                "cluster_key": "normal_contributor",
+                "cluster_label": "Normal Contributor",
+                "composite_score": 0.31,
+                "active_platforms": ["code", "meetings"],
+            }
+            for _ in team_students
+        ],
     )
 
     enriched = enrich_scores_summary_with_ml_insights(summary)
 
     assert enriched.scores[0].outlier.is_outlier is True
-    assert enriched.team_archetype.archetype == "balanced_team"
+    assert enriched.scores[0].student_cluster.cluster_label == "Normal Contributor"
+    assert enriched.scores[0].student_cluster.composite_score == 0.31

@@ -36,18 +36,9 @@ class DashboardAssignmentActionOut(BaseModel):
     status: ServiceType
 
 
-class TeamClassificationCountOut(BaseModel):
-    archetype: str
-    label: str
-    count: int
-
-
 class InstructorDashboardOut(BaseModel):
     summary: DashboardSummaryOut
     recent_reports: list[DashboardReportRowOut]
     all_reports: list[DashboardReportRowOut]
     failed_reports: list[DashboardReportRowOut]
     assignments_without_reports: list[DashboardAssignmentActionOut]
-    team_classifications: list[TeamClassificationCountOut]
-    classified_group_count: int = 0
-    unclassified_group_count: int = 0

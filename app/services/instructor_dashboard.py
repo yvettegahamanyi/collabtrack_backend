@@ -9,7 +9,6 @@ from app.models import (
     ContributionReport,
     CourseClass,
     GroupMembership,
-    MemberParticipationScore,
     ProjectGroup,
     ReportStatus,
     ServiceType,
@@ -20,30 +19,9 @@ from app.schemas.instructor_dashboard import (
     DashboardReportRowOut,
     DashboardSummaryOut,
     InstructorDashboardOut,
-    TeamClassificationCountOut,
-)
-from app.services.participation_scoring import (
-    ParticipationScoreResult,
-    _predict_team_archetype_for_scores,
-)
-from app.services.team_cluster_model import (
-    TeamClusterModelUnavailableError,
-    get_team_cluster_model_bundle,
 )
 
 _RECENT_REPORT_LIMIT = 5
-_TEAM_ARCHETYPE_ORDER = (
-    "balanced_team",
-    "high_performing_cohesive",
-    "one_dominant_contributor",
-    "uniformly_disengaged",
-)
-_FALLBACK_ARCHETYPE_LABELS = {
-    "balanced_team": "Balanced team",
-    "one_dominant_contributor": "One dominant contributor",
-    "uniformly_disengaged": "Uniformly disengaged team",
-    "high_performing_cohesive": "High-performing cohesive team",
-}
 
 
 def _empty_dashboard() -> InstructorDashboardOut:
@@ -59,9 +37,6 @@ def _empty_dashboard() -> InstructorDashboardOut:
         all_reports=[],
         failed_reports=[],
         assignments_without_reports=[],
-        team_classifications=[],
-        classified_group_count=0,
-        unclassified_group_count=0,
     )
 
 
@@ -96,72 +71,6 @@ async def _notification_sent_by_group(
         if group_id not in result:
             result[group_id] = notification_sent_at
     return result
-
-
-def _archetype_labels() -> dict[str, str]:
-    try:
-        bundle = get_team_cluster_model_bundle()
-        return dict(bundle.archetype_labels)
-    except TeamClusterModelUnavailableError:
-        return dict(_FALLBACK_ARCHETYPE_LABELS)
-
-
-async def _team_classification_counts(
-    groups: list[ProjectGroup], db: AsyncSession
-) -> tuple[list[TeamClassificationCountOut], int, int]:
-    if not groups:
-        return [], 0, 0
-
-    groups_with_scores = [
-        group for group in groups if group.participation_scores_generated_at is not None
-    ]
-    if not groups_with_scores:
-        return [], 0, len(groups)
-
-    group_ids = [group.id for group in groups_with_scores]
-    records = await db.scalars(
-        select(MemberParticipationScore).where(
-            MemberParticipationScore.group_id.in_(group_ids)
-        )
-    )
-
-    scores_by_group: dict[str, list[ParticipationScoreResult]] = {}
-    for row in records.all():
-        scores_by_group.setdefault(row.group_id, []).append(
-            ParticipationScoreResult(
-                user_id=row.user_id,
-                name=None,
-                predicted_score=row.predicted_score,
-                contributor_tier=row.contributor_tier,
-                features=dict(row.features or {}),
-                generated_at=row.generated_at,
-            )
-        )
-
-    counts: dict[str, int] = {}
-    classified_group_count = 0
-    for group in groups_with_scores:
-        scores = scores_by_group.get(group.id, [])
-        if not scores:
-            continue
-        archetype = _predict_team_archetype_for_scores(scores)
-        if archetype is None:
-            continue
-        counts[archetype.archetype] = counts.get(archetype.archetype, 0) + 1
-        classified_group_count += 1
-
-    labels = _archetype_labels()
-    team_classifications = [
-        TeamClassificationCountOut(
-            archetype=archetype,
-            label=labels.get(archetype, archetype.replace("_", " ").title()),
-            count=counts[archetype],
-        )
-        for archetype in _TEAM_ARCHETYPE_ORDER
-        if counts.get(archetype, 0) > 0
-    ]
-    unclassified_group_count = len(groups) - classified_group_count
-    return team_classifications, classified_group_count, unclassified_group_count
 
 
 async def get_instructor_dashboard(
@@ -209,9 +118,6 @@ async def get_instructor_dashboard(
             all_reports=[],
             failed_reports=[],
             assignments_without_reports=[],
-            team_classifications=[],
-            classified_group_count=0,
-            unclassified_group_count=0,
         )
 
     report_counts = await db.execute(
@@ -289,10 +195,6 @@ async def get_instructor_dashboard(
         row for row in all_reports if row.report_status == ReportStatus.FAILED
     ]
 
-    team_classifications, classified_group_count, unclassified_group_count = (
-        await _team_classification_counts(groups, db)
-    )
-
     summary = DashboardSummaryOut(
         class_count=len(classes),
         active_assignment_count=active_assignment_count,
@@ -306,7 +208,4 @@ async def get_instructor_dashboard(
         all_reports=all_reports,
         failed_reports=failed_reports,
         assignments_without_reports=assignments_without_reports,
-        team_classifications=team_classifications,
-        classified_group_count=classified_group_count,
-        unclassified_group_count=unclassified_group_count,
     )
