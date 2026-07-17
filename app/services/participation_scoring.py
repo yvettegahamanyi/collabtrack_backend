@@ -30,11 +30,6 @@ from app.services.benchmark_model import (
     BenchmarkModelUnavailableError,
     classify_contributor,
 )
-from app.services.outlier_model import (
-    OutlierModelUnavailableError,
-    detect_student_outlier,
-    is_outlier_model_available,
-)
 from app.services.student_cluster_model import (
     StudentClusterModelUnavailableError,
     is_student_cluster_model_available,
@@ -60,13 +55,6 @@ from app.services.participation import get_contributions
 
 
 @dataclass
-class OutlierDetectionResult:
-    is_outlier: bool
-    anomaly_score: float
-    outlier_type: str
-
-
-@dataclass
 class StudentClusterResult:
     cluster_id: int
     cluster_key: str
@@ -83,7 +71,6 @@ class ParticipationScoreResult:
     contributor_tier: str
     features: dict[str, float]
     generated_at: datetime
-    outlier: OutlierDetectionResult | None = None
     student_cluster: StudentClusterResult | None = None
     llm_rationale: dict | None = None
 
@@ -142,28 +129,11 @@ def _attach_student_clusters_to_scores(
             contributor_tier=score.contributor_tier,
             features=score.features,
             generated_at=score.generated_at,
-            outlier=score.outlier,
             student_cluster=_student_cluster_from_prediction(cluster),
             llm_rationale=score.llm_rationale,
         )
         for score, cluster in zip(scores, cluster_results, strict=True)
     ]
-
-
-def _detect_outlier_for_features(
-    features: dict[str, float],
-) -> OutlierDetectionResult | None:
-    if not is_outlier_model_available():
-        return None
-    try:
-        result = detect_student_outlier(features)
-    except OutlierModelUnavailableError:
-        return None
-    return OutlierDetectionResult(
-        is_outlier=bool(result["is_outlier"]),
-        anomaly_score=float(result["anomaly_score"]),
-        outlier_type=str(result["outlier_type"]),
-    )
 
 
 def enrich_scores_summary_with_ml_insights(
@@ -172,20 +142,7 @@ def enrich_scores_summary_with_ml_insights(
     if not summary.scores:
         return summary
 
-    enriched_scores = [
-        ParticipationScoreResult(
-            user_id=score.user_id,
-            name=score.name,
-            predicted_score=score.predicted_score,
-            contributor_tier=score.contributor_tier,
-            features=score.features,
-            generated_at=score.generated_at,
-            outlier=_detect_outlier_for_features(score.features),
-            llm_rationale=score.llm_rationale,
-        )
-        for score in summary.scores
-    ]
-    enriched_scores = _attach_student_clusters_to_scores(enriched_scores)
+    enriched_scores = _attach_student_clusters_to_scores(summary.scores)
     return ParticipationScoresSummary(
         group_id=summary.group_id,
         generated_at=summary.generated_at,
@@ -697,7 +654,7 @@ def _print_scoring_debug(
         for wline in textwrap.wrap(llm_output.group_observations, width=_BOX_WIDTH - 4):
             lines.append(f"    {_C.BLUE}{wline}{_C.RESET}")
 
-    # --- ML enrichment (student clustering, outlier) ---
+    # --- ML enrichment (student clustering) ---
     lines.append(_rule("ML ENRICHMENT"))
     for ref, membership in member_by_ref.items():
         score = score_by_userid.get(ref_to_userid.get(ref))
@@ -716,21 +673,6 @@ def _print_scoring_debug(
                 f"{_C.DIM}(cluster {cluster.cluster_id}, composite="
                 f"{cluster.composite_score:.3f}, platforms={platforms}){_C.RESET}"
             )
-
-        outlier = score.outlier
-        if outlier is None:
-            lines.append(f"  {ref} ({name}): {_C.DIM}outlier model unavailable{_C.RESET}")
-            continue
-        flag = (
-            f"{_C.RED}{_C.BOLD}OUTLIER{_C.RESET}"
-            if outlier.is_outlier
-            else f"{_C.GREEN}typical{_C.RESET}"
-        )
-        lines.append(
-            f"  {ref} ({name}): {flag}  "
-            f"{_C.DIM}type={outlier.outlier_type} "
-            f"anomaly={outlier.anomaly_score:.3f}{_C.RESET}"
-        )
 
     lines.append(_C.CYAN + _C.BOLD + "═" * (_BOX_WIDTH + 2) + _C.RESET)
     lines.append("")
@@ -957,7 +899,6 @@ async def get_member_participation_score(
             contributor_tier=row.contributor_tier,
             features=dict(row.features or {}),
             generated_at=row.generated_at,
-            outlier=_detect_outlier_for_features(dict(row.features or {})),
             llm_rationale=dict(row.llm_rationale) if row.llm_rationale else None,
         )
         for row in all_rows

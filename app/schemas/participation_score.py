@@ -3,12 +3,6 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class OutlierDetectionOut(BaseModel):
-    is_outlier: bool
-    anomaly_score: float = Field(ge=0.0)
-    outlier_type: str
-
-
 class StudentClusterOut(BaseModel):
     cluster_id: int
     cluster_key: str
@@ -33,7 +27,6 @@ class ParticipationScoreOut(BaseModel):
     contributor_tier: str
     features: dict[str, float] = Field(default_factory=dict)
     generated_at: datetime
-    outlier: OutlierDetectionOut | None = None
     student_cluster: StudentClusterOut | None = None
     llm_rationale: LLMRationaleOut | None = None
 

@@ -47,7 +47,6 @@ from app.schemas.integration import (
 from app.schemas.participation import ContributionsOut, MemberParticipationOut, SyncOut
 from app.schemas.participation_score import (
     LLMRationaleOut,
-    OutlierDetectionOut,
     ParticipationScoreOut,
     ParticipationScoresSummaryOut,
     StudentClusterOut,
@@ -788,15 +787,6 @@ def _serialize_scores_summary(summary) -> ParticipationScoresSummaryOut:
                 contributor_tier=score.contributor_tier,
                 features=score.features,
                 generated_at=score.generated_at,
-                outlier=(
-                    OutlierDetectionOut(
-                        is_outlier=score.outlier.is_outlier,
-                        anomaly_score=score.outlier.anomaly_score,
-                        outlier_type=score.outlier.outlier_type,
-                    )
-                    if score.outlier is not None
-                    else None
-                ),
                 student_cluster=(
                     StudentClusterOut(
                         cluster_id=score.student_cluster.cluster_id,
@@ -914,15 +904,6 @@ async def get_member_participation_score_endpoint(
             contributor_tier=score.contributor_tier,
             features=score.features,
             generated_at=score.generated_at,
-            outlier=(
-                OutlierDetectionOut(
-                    is_outlier=score.outlier.is_outlier,
-                    anomaly_score=score.outlier.anomaly_score,
-                    outlier_type=score.outlier.outlier_type,
-                )
-                if score.outlier is not None
-                else None
-            ),
             student_cluster=(
                 StudentClusterOut(
                     cluster_id=score.student_cluster.cluster_id,

@@ -97,7 +97,7 @@ def test_enrich_scores_summary_returns_empty_summary_unchanged():
     assert enriched.warnings == ["none"]
 
 
-def test_enrich_scores_summary_adds_outlier_and_student_cluster(monkeypatch):
+def test_enrich_scores_summary_adds_student_cluster(monkeypatch):
     summary = ParticipationScoresSummary(
         group_id="g1",
         generated_at=datetime.now(timezone.utc),
@@ -105,18 +105,6 @@ def test_enrich_scores_summary_adds_outlier_and_student_cluster(monkeypatch):
         warnings=[],
     )
 
-    monkeypatch.setattr(
-        "app.services.participation_scoring.is_outlier_model_available",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        "app.services.participation_scoring.detect_student_outlier",
-        lambda features: {
-            "is_outlier": True,
-            "anomaly_score": 0.9,
-            "outlier_type": "free_rider",
-        },
-    )
     monkeypatch.setattr(
         "app.services.participation_scoring.is_student_cluster_model_available",
         lambda: True,
@@ -137,6 +125,5 @@ def test_enrich_scores_summary_adds_outlier_and_student_cluster(monkeypatch):
 
     enriched = enrich_scores_summary_with_ml_insights(summary)
 
-    assert enriched.scores[0].outlier.is_outlier is True
     assert enriched.scores[0].student_cluster.cluster_label == "Normal Contributor"
     assert enriched.scores[0].student_cluster.composite_score == 0.31
