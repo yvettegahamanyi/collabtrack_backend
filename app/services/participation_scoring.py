@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,10 +26,6 @@ from app.models import (
     MemberParticipationScore,
     ParticipationSnapshot,
     ProjectGroup,
-)
-from app.services.benchmark_model import (
-    BenchmarkModelUnavailableError,
-    classify_contributor,
 )
 from app.services.student_cluster_model import (
     StudentClusterModelUnavailableError,
@@ -152,14 +149,11 @@ def enrich_scores_summary_with_ml_insights(
 
 
 def _classify_score(score: float) -> str:
-    try:
-        return classify_contributor(score)
-    except BenchmarkModelUnavailableError:
-        if score >= 0.7:
-            return "strong"
-        if score >= 0.5:
-            return "average"
-        return "below"
+    if score >= 0.7:
+        return "strong"
+    if score >= 0.5:
+        return "average"
+    return "below"
 
 
 async def _meeting_activity_totals(
@@ -637,7 +631,7 @@ def _print_scoring_debug(
         lines.append(
             f"  {_C.GREEN}{_C.BOLD}{ref}{_C.RESET} ({name})  "
             f"{tier_color}{_C.BOLD}score={result.score:.3f} [{tier}]{_C.RESET}  "
-            f"{_C.DIM}confidence={result.confidence:.2f}{_C.RESET}"
+            f"{_C.DIM}data_completeness={result.data_completeness:.2f}{_C.RESET}"
         )
         lines.append(f"    {_C.DIM}top_area:{_C.RESET} {result.top_area}")
         if result.flags:
@@ -790,7 +784,8 @@ async def generate_participation_scores(
             "reasoning": member_result.reasoning,
             "top_area": member_result.top_area,
             "flags": member_result.flags,
-            "confidence": member_result.confidence,
+            # API/frontend still expose this as "confidence"; source is measurement trust.
+            "confidence": member_result.data_completeness,
             "group_observations": llm_output.group_observations,
             "model_version": llm_output.model_version,
         }
@@ -930,5 +925,8 @@ async def try_generate_participation_scores_for_report(
     except HTTPException as exc:
         warnings.append(str(exc.detail))
     except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to generate participation scores for group %s", group.id
+        )
         warnings.append("Failed to generate ML participation scores.")
     return warnings

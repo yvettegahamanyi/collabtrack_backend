@@ -29,7 +29,7 @@ class StudentClusterModelBundle:
     platforms: dict[str, list[str]]
     cluster_name_map: dict[int, str]
     eps: float
-    scoring_method: str = "platform_aware_team_relative_v2"
+    scoring_method: str = "platform_aware_team_relative"
 
 
 def _model_dir() -> Path:
@@ -48,6 +48,7 @@ def _load_metadata(model_dir: Path) -> dict[str, Any]:
 
 
 def _normalize_cluster_map(raw_map: dict[Any, Any]) -> dict[int, str]:
+    # joblib may restore map keys as numpy integer types
     return {int(key): str(value) for key, value in raw_map.items()}
 
 
@@ -112,7 +113,7 @@ def _load_bundle_from_payload(
         cluster_name_map=cluster_name_map,
         eps=float(payload.get("eps", 1e-9)),
         scoring_method=str(
-            payload.get("scoring_method") or "platform_aware_team_relative_v2"
+            payload.get("scoring_method") or "platform_aware_team_relative"
         ),
     )
 

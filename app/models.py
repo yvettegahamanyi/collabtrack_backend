@@ -61,11 +61,6 @@ class RoleType(str, enum.Enum):
     ADMIN = "ADMIN"
 
 
-class PlatformType(str, enum.Enum):
-    GITHUB = "GITHUB"
-    GOOGLE_DOCS = "GOOGLE_DOCS"
-
-
 class IntegrationProvider(str, enum.Enum):
     github = "github"
     google = "google"
@@ -74,11 +69,6 @@ class IntegrationProvider(str, enum.Enum):
 class ServiceType(str, enum.Enum):
     ACTIVE = "ACTIVE"
     DONE = "DONE"
-
-
-class AssetType(str, enum.Enum):
-    GITHUB_REPOSITORY = "GITHUB_REPOSITORY"
-    GOOGLE_DRIVE_DOC = "GOOGLE_DRIVE_DOC"
 
 
 class GroupMemberRole(str, enum.Enum):
@@ -162,9 +152,6 @@ class User(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    oauth_tokens: Mapped[list["StudentOAuthToken"]] = relationship(
-        back_populates="student", cascade="all, delete-orphan"
-    )
     integrations: Mapped[list["UserIntegration"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
@@ -294,21 +281,6 @@ class ParticipationSnapshot(Base):
     user: Mapped["User"] = relationship()
 
 
-class StudentOAuthToken(Base):
-    __tablename__ = "student_oauth_tokens"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
-    student_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
-    platform: Mapped[PlatformType] = mapped_column(SAEnum(PlatformType))
-    oauth_token: Mapped[str | None] = mapped_column(String)
-    authorized_email: Mapped[str | None] = mapped_column(String)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-    student: Mapped["User"] = relationship(back_populates="oauth_tokens")
-
-
 class ProjectGroup(Base):
     __tablename__ = "project_groups"
 
@@ -349,12 +321,6 @@ class ProjectGroup(Base):
         back_populates="group", cascade="all, delete-orphan"
     )
     invitations: Mapped[list["GroupInvitation"]] = relationship(
-        back_populates="group", cascade="all, delete-orphan"
-    )
-    assets: Mapped[list["SharedWorkspaceAsset"]] = relationship(
-        back_populates="group", cascade="all, delete-orphan"
-    )
-    transcripts: Mapped[list["Transcript"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
     contribution_reports: Mapped[list["ContributionReport"]] = relationship(
@@ -438,58 +404,6 @@ class GroupInvitation(Base):
 
     group: Mapped["ProjectGroup"] = relationship(back_populates="invitations")
     created_by: Mapped["User"] = relationship(foreign_keys=[created_by_id])
-
-
-class SharedWorkspaceAsset(Base):
-    __tablename__ = "shared_workspace_assets"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
-    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
-    asset_type: Mapped[AssetType] = mapped_column(SAEnum(AssetType))
-    target_url: Mapped[str | None] = mapped_column(String)
-    connection_status: Mapped[str | None] = mapped_column(String)
-
-    group: Mapped["ProjectGroup"] = relationship(back_populates="assets")
-    sync_metrics: Mapped[list["SyncMetricsLog"]] = relationship(
-        back_populates="asset", cascade="all, delete-orphan"
-    )
-
-
-class SyncMetricsLog(Base):
-    __tablename__ = "sync_metrics_log"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
-    asset_id: Mapped[str] = mapped_column(ForeignKey("shared_workspace_assets.id"))
-    student_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
-    commit_frequency: Mapped[int] = mapped_column(Integer, default=0)
-    lines_of_code_changed: Mapped[int] = mapped_column(Integer, default=0)
-    pr_acceptance_rate: Mapped[float] = mapped_column(Float, default=0.0)
-    issue_resolution_count: Mapped[int] = mapped_column(Integer, default=0)
-    revision_count: Mapped[int] = mapped_column(Integer, default=0)
-    revision_depth: Mapped[int] = mapped_column(Integer, default=0)
-    comment_threads_count: Mapped[int] = mapped_column(Integer, default=0)
-    synced_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    asset: Mapped["SharedWorkspaceAsset"] = relationship(back_populates="sync_metrics")
-
-
-class Transcript(Base):
-    __tablename__ = "transcripts"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=generate_uuid)
-    group_id: Mapped[str] = mapped_column(ForeignKey("project_groups.id"))
-    uploaded_by_student_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
-    file_url: Mapped[str | None] = mapped_column(String)
-    ai_generated_summary: Mapped[str | None] = mapped_column(Text)
-    word_count: Mapped[int | None] = mapped_column(Integer)
-    speaking_turns: Mapped[int | None] = mapped_column(Integer)
-    uploaded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-
-    group: Mapped["ProjectGroup"] = relationship(back_populates="transcripts")
 
 
 class ContributionReport(Base):

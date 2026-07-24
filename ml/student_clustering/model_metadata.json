@@ -1,8 +1,8 @@
 {
   "model_type": "KMeans (platform-aware composite score)",
-  "version": "v2",
+  "version": "Approach C (final, recommended)",
   "labeling_method": "Per-team detection of active platforms (code/meetings/communication); each student's composite score = mean of standardized features ONLY within platforms their team actually used; then KMeans k=3 on that score.",
-  "n_clusters": 3,
+  "n_clusters": 5,
   "random_state": 42,
   "platforms": {
     "code": [
@@ -35,21 +35,51 @@
   },
   "cluster_name_map": {
     "0": "Free-Rider",
-    "2": "Normal Contributor",
-    "1": "Over-Contributor"
+    "3": "Below-Average Contributor",
+    "1": "Normal Contributor",
+    "4": "Over-Contributor",
+    "2": "Exceptional Contributor"
   },
-  "training_metrics": {
-    "silhouette": 0.5561832278275328
+  "model_comparison": {
+    "approach_a_raw_multi_feature": {
+      "silhouette": 0.39119709745072456,
+      "note": "Rejected: only 3/6 features agreed with the overall magnitude ranking -- clusters split by contribution STYLE, not level."
+    },
+    "approach_b_composite_score_population_wide": {
+      "silhouette": 0.6010572834384733,
+      "note": "Improved on Approach A, but structurally penalizes students on single-platform teams (proven bug: see Section 8)."
+    },
+    "approach_c_platform_aware_final": {
+      "silhouette": 0.5986923676427902,
+      "note": "Final choice: fixes the single-platform-team bias found in Approach B while keeping Approach B's guaranteed monotonic magnitude ordering."
+    },
+    "adjusted_rand_index_a_vs_b": 0.3083954131457589
   },
   "cluster_sizes": {
-    "Free-Rider": 82,
-    "Normal Contributor": 64,
-    "Over-Contributor": 10
+    "Free-Rider": 47,
+    "Below-Average Contributor": 67,
+    "Normal Contributor": 32,
+    "Over-Contributor": 7,
+    "Exceptional Contributor": 3
   },
   "teams_by_platforms_used": {
     "1": 9,
     "2": 18,
     "3": 16
   },
-  "notes": "benchmark_score is excluded from the model and must NOT be sent by API clients. v1 (population-wide, non-platform-aware) model is superseded by this version for any team that doesn't use all 3 platforms."
+  "synthetic_data_disclosure": {
+    "n_real": 156,
+    "n_synthetic": 30,
+    "synthetic_pct": 0.16129032258064516,
+    "used_in_final_model": false,
+    "note": "Approach C (this final model) is trained on REAL STUDENTS ONLY. The synthetic seed was used only during Approach B's development and is not part of the final deployed model.",
+    "real_students_relabeled_by_synthetic_seed_pct": 0.4807692307692308,
+    "note_on_this_pct": "At k=5 this is much higher (~48%) than it was at k=3 (~10%) -- finer bins are more boundary-sensitive; see Section 6."
+  },
+  "stability_check": {
+    "method": "bootstrap resampling, n=40, ARI vs. reference clustering (Approach B)",
+    "mean_ari": 0.8678930032496508,
+    "std_ari": 0.14878528835600413
+  },
+  "notes": "benchmark_score is excluded from the model and must NOT be sent by API clients."
 }

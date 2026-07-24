@@ -31,6 +31,7 @@ from app.services.classes import (
 )
 from app.services.contribution_report import (
     attempt_complete_report_delivery,
+    check_and_finalize_report,
     resend_supervisor_notification,
 )
 from app.services.groups import get_group_or_404
@@ -334,12 +335,19 @@ async def get_report(
         raise HTTPException(status_code=404, detail="Report not found.")
 
     contributions = None
-    if group.report_status and group.report_status.value == "READY":
+    if group.report_status == ReportStatus.READY:
         await attempt_complete_report_delivery(group, assignment, db)
         await db.refresh(group)
         contributions = await get_contributions(group, db)
-    elif group.report_status and group.report_status.value == "PROCESSING":
+    elif group.report_status == ReportStatus.PROCESSING:
+        # Retry delivery on poll — e.g. after a transient scoring failure.
+        await check_and_finalize_report(group_id)
+        await db.refresh(group)
         contributions = await get_contributions(group, db)
+        reports = await serialize_assignment_reports(assignment_id, db)
+        report_summary = next(
+            (item for item in reports if item.group_id == group_id), report_summary
+        )
 
     return success(
         data=AssignmentReportDetailOut(

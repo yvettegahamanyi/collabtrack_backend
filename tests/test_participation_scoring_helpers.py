@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -48,24 +47,10 @@ def test_tier_display_label(tier, label):
     assert tier_display_label(tier) == label
 
 
-def test_classify_score_uses_benchmark_model_when_available():
-    with patch(
-        "app.services.participation_scoring.classify_contributor",
-        return_value="strong",
-    ):
-        assert _classify_score(0.9) == "strong"
-
-
-def test_classify_score_falls_back_when_model_unavailable():
-    from app.services.benchmark_model import BenchmarkModelUnavailableError
-
-    with patch(
-        "app.services.participation_scoring.classify_contributor",
-        side_effect=BenchmarkModelUnavailableError("missing"),
-    ):
-        assert _classify_score(0.75) == "strong"
-        assert _classify_score(0.55) == "average"
-        assert _classify_score(0.25) == "below"
+def test_classify_score_maps_llm_scores_to_tiers():
+    assert _classify_score(0.9) == "strong"
+    assert _classify_score(0.55) == "average"
+    assert _classify_score(0.25) == "below"
 
 
 def test_participation_scores_are_stale_when_sync_is_newer():

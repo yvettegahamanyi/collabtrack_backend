@@ -28,19 +28,22 @@ def _write_mock_artifacts(model_dir: Path) -> None:
             "comment_activity",
         ],
     }
+    cluster_name_map = {
+        0: "Free-Rider",
+        3: "Below-Average Contributor",
+        1: "Normal Contributor",
+        4: "Over-Contributor",
+        2: "Exceptional Contributor",
+    }
     metadata = {
         "model_type": "KMeans (platform-aware composite score)",
-        "version": "v2",
-        "n_clusters": 3,
+        "version": "Approach C (final, recommended)",
+        "n_clusters": 5,
         "platforms": platforms,
         "input_schema": {
             "required_raw_features_in_order": list(ML_FEATURE_COLUMNS),
         },
-        "cluster_name_map": {
-            "0": "Free-Rider",
-            "1": "Over-Contributor",
-            "2": "Normal Contributor",
-        },
+        "cluster_name_map": {str(key): value for key, value in cluster_name_map.items()},
     }
     (model_dir / "student_clustering").mkdir(parents=True)
     (model_dir / "student_clustering/model_metadata.json").write_text(
@@ -52,7 +55,7 @@ def _write_mock_artifacts(model_dir: Path) -> None:
     scaler = StandardScaler()
     scaled = scaler.fit_transform(samples)
     composite = scaled.mean(axis=1, keepdims=True)
-    kmeans = KMeans(n_clusters=3, random_state=11, n_init=10)
+    kmeans = KMeans(n_clusters=5, random_state=11, n_init=10)
     kmeans.fit(composite)
 
     joblib.dump(
@@ -61,13 +64,9 @@ def _write_mock_artifacts(model_dir: Path) -> None:
             "kmeans_1d": kmeans,
             "all_features": list(ML_FEATURE_COLUMNS),
             "platforms": platforms,
-            "cluster_name_map": {
-                0: "Free-Rider",
-                1: "Over-Contributor",
-                2: "Normal Contributor",
-            },
+            "cluster_name_map": cluster_name_map,
             "eps": 1e-9,
-            "scoring_method": "platform_aware_team_relative_v2",
+            "scoring_method": "platform_aware_team_relative",
         },
         model_dir / "student_clustering/model_bundle.joblib",
     )
@@ -153,6 +152,10 @@ def test_predict_team_clusters_with_real_artifacts():
 def test_cluster_key_slugifies_label():
     assert student_cluster_model._cluster_key("Free-Rider") == "free_rider"
     assert (
+        student_cluster_model._cluster_key("Below-Average Contributor")
+        == "below_average_contributor"
+    )
+    assert (
         student_cluster_model._cluster_key("Normal Contributor")
         == "normal_contributor"
     )
@@ -160,3 +163,21 @@ def test_cluster_key_slugifies_label():
         student_cluster_model._cluster_key("Over-Contributor")
         == "over_contributor"
     )
+    assert (
+        student_cluster_model._cluster_key("Exceptional Contributor")
+        == "exceptional_contributor"
+    )
+
+
+def test_real_artifacts_expose_five_named_clusters():
+    bundle = student_cluster_model.get_student_cluster_model_bundle()
+
+    assert bundle.kmeans.n_clusters == 5
+    assert set(bundle.cluster_name_map.values()) == {
+        "Free-Rider",
+        "Below-Average Contributor",
+        "Normal Contributor",
+        "Over-Contributor",
+        "Exceptional Contributor",
+    }
+    assert bundle.scoring_method == "platform_aware_team_relative"

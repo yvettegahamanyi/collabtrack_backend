@@ -825,7 +825,7 @@ async def _viewer_can_manage_group(
         403: {"description": "Only owner or instructor can generate scores."},
         409: {"description": "Scores already generated."},
         422: {"description": "Participation not synced."},
-        503: {"description": "ML model unavailable."},
+        503: {"description": "LLM scoring unavailable."},
     },
 )
 async def generate_group_participation_scores(

@@ -1,6 +1,7 @@
 import csv
 import io
 from datetime import datetime, timezone
+from io import BytesIO
 
 import pytest
 from fastapi import HTTPException
@@ -99,6 +100,16 @@ def test_parse_dataset_csv_skips_rows_with_missing_required_values():
 
     assert len(records) == 1
     assert skipped == 1
+
+
+def test_parse_dataset_csv_rejects_non_utf8_encoding(monkeypatch):
+    def _raise_unicode_error(*args, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr("app.services.dataset.io.TextIOWrapper", _raise_unicode_error)
+
+    with pytest.raises(HTTPException, match="UTF-8"):
+        parse_dataset_csv(BytesIO(b"\xff\xfe\x00\x00"))
 
 
 def test_parse_dataset_csv_skips_blank_rows():
