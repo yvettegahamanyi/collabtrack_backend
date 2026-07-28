@@ -75,7 +75,7 @@ class ParticipationScoreResult:
 @dataclass
 class ParticipationScoresSummary:
     group_id: str
-    generated_at: datetime
+    generated_at: datetime | None
     scores: list[ParticipationScoreResult]
     warnings: list[str]
 
@@ -835,6 +835,20 @@ async def generate_participation_scores(
     return enriched
 
 
+async def ensure_participation_scores_for_group(
+    group: ProjectGroup,
+    db: AsyncSession,
+) -> list[str]:
+    """Generate scores when participation is synced but none are persisted yet."""
+    if await _load_existing_scores(group, db) is not None:
+        return []
+
+    if await _latest_snapshot_sync_at(group, db) is None:
+        return []
+
+    return await try_generate_participation_scores_for_report(group, db)
+
+
 async def get_participation_scores_for_group(
     group: ProjectGroup,
     db: AsyncSession,
@@ -846,7 +860,7 @@ async def get_participation_scores_for_group(
     if existing is None:
         return ParticipationScoresSummary(
             group_id=group.id,
-            generated_at=datetime.now(timezone.utc),
+            generated_at=None,
             scores=[],
             warnings=[],
         )
@@ -909,7 +923,9 @@ async def try_generate_participation_scores_for_report(
     """Best-effort score generation for instructor reports; never raises."""
     warnings: list[str] = []
     if group.participation_scores_generated_at is not None:
-        return warnings
+        if await _load_existing_scores(group, db) is not None:
+            return warnings
+        await _clear_participation_scores(group, db)
 
     try:
         await _require_synced_participation(group, db)

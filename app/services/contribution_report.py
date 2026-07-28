@@ -162,8 +162,10 @@ async def attempt_complete_report_delivery(
 
         if not ready and "scores_not_generated" in blockers:
             await try_generate_participation_scores_for_report(group, db)
+            await db.commit()
         elif not ready and "scores_stale" in blockers:
             await maybe_regenerate_scores_after_sync(group, db)
+            await db.commit()
 
         await db.refresh(group)
         ready, blockers, _warnings = await report_delivery_readiness(group, db)

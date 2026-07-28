@@ -35,6 +35,6 @@ class ParticipationScoresSummaryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     group_id: str
-    generated_at: datetime
+    generated_at: datetime | None = None
     scores: list[ParticipationScoreOut]
     warnings: list[str] = Field(default_factory=list)

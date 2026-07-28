@@ -74,6 +74,7 @@ from app.services.participation import (
     sync_group_participation,
 )
 from app.services.participation_scoring import (
+    ensure_participation_scores_for_group,
     generate_participation_scores,
     get_member_participation_score,
     get_participation_scores_for_group,
@@ -857,12 +858,24 @@ async def get_group_participation_scores(
     group = await get_group_or_404(group_id, db)
     await require_membership(group_id, current_user, db)
     can_manage = await _viewer_can_manage_group(group, current_user, db)
+    warnings: list[str] = []
+    if can_manage:
+        warnings = await ensure_participation_scores_for_group(group, db)
+        await db.commit()
+        await db.refresh(group)
     summary = await get_participation_scores_for_group(
         group,
         db,
         viewer_user_id=current_user.id,
         viewer_is_manager=can_manage,
     )
+    if warnings:
+        summary = summary.__class__(
+            group_id=summary.group_id,
+            generated_at=summary.generated_at,
+            scores=summary.scores,
+            warnings=[*summary.warnings, *warnings],
+        )
     return success(
         data=_serialize_scores_summary(summary),
         message="Participation scores retrieved successfully.",

@@ -39,6 +39,7 @@ async def test_get_participation_scores_for_group_returns_empty_when_missing():
     )
 
     assert summary.scores == []
+    assert summary.generated_at is None
 
 
 @pytest.mark.asyncio
@@ -113,12 +114,16 @@ async def test_get_member_participation_score_returns_none_when_missing():
 
 
 @pytest.mark.asyncio
-async def test_try_generate_participation_scores_skips_when_already_generated():
+async def test_try_generate_participation_scores_skips_when_already_generated(monkeypatch):
     group = SimpleNamespace(
         id="g1",
         participation_scores_generated_at=datetime.now(timezone.utc),
     )
     db = AsyncMock()
+    monkeypatch.setattr(
+        "app.services.participation_scoring._load_existing_scores",
+        AsyncMock(return_value=object()),
+    )
 
     warnings = await try_generate_participation_scores_for_report(group, db)
 
